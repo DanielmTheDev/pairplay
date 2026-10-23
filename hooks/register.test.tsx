@@ -1,5 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { COLORS } from './scene'
+
 const PANE = {
   plugin: 'pairplay',
   component: 'Pane',
@@ -23,6 +25,7 @@ const peerSay = JSON.stringify({
 test('host: subscribes, receives peer chat, answers hello, chats back', async ($, on) => {
   const posts: { url: string; body: string }[] = []
   const spawned: string[][] = []
+  mock.clock(on)
 
   on('command.register', () => ({ value: { command: 'coop' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -130,7 +133,7 @@ test('host: seats guest, hides first pick, resolves on second', async ($, on) =>
   expect(after.players.peer.life).toBe(2)
   expect(after.last).toEqual({ round: 1, picks: { peer: 'fire', 'my-session': 'water' }, loser: 'peer' })
 
-  await clock.advance(2400)
+  await clock.advance(3000)
   await ui.unmount()
   const after2 = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await after2.find({ type: 'Text', text: /round 1: .*caren fire.* → caren -1/ })).toBeDefined()
@@ -163,8 +166,33 @@ test('guest: cast sends intent only; host snapshot is what shows', async ($, on)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /round 2/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /dani.*picked/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /dani.*✦/ })).toBeDefined()
   await ui.press({ key: 'fire' })
   expect(posts.filter(p => p.type === 'intent').at(-1)?.payload).toEqual({ kind: 'cast', element: 'fire' })
+  await ui.unmount()
+})
+
+test('guest: own pick shows as its icon on the stage', async ($, on) => {
+  const duel = {
+    seq: 5,
+    round: 2,
+    players: {
+      host: { name: 'dani', life: 3, picked: false },
+      'my-session': { name: 'alice', life: 3, picked: true },
+    },
+  }
+  harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await new Promise(r => setTimeout(r, 50))
+  await $.command.run({ command: 'coop', args: 'cast nature' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const stage = await ui.find({ type: 'Raster', key: 'stage' })
+  const bytes = Uint8Array.from(atob(String(stage?.props.cells)), c => c.charCodeAt(0))
+  const words = [...new Uint32Array(bytes.buffer)]
+  expect(words.includes(COLORS.icon.nature)).toBe(true)
+  expect(words.includes(COLORS.icon.fire)).toBe(false)
+  expect(await ui.find({ type: 'Button', key: 'nature' })).toMatchObject({ props: { label: '🌿' } })
   await ui.unmount()
 })

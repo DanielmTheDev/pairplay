@@ -28,6 +28,7 @@ declare module 'claude-code' {
       conn: Conn
       game: Shaped<Duel>
       picks: Record<string, Element>
+      mine: { round: number; element: Element } | null
     }
   }
 }

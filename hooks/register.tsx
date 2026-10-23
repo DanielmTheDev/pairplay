@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Conn, Duel, LogLine, Peer } from '../types'
+import type { Conn, Duel, Element, LogLine, Peer } from '../types'
 import { ELEMENTS, INITIAL_DUEL, acceptSnapshot, applyIntent, isElement, seat } from './game'
-import { ANIM_MS, FRAME_MS, STAGE_PX_H, STAGE_ROWS, drawStage, encodeCells, stageColumns } from './scene'
+import { FRAME_MS, STAGE_PX_H, STAGE_ROWS, drawStage, encodeCells, roundMs, stageColumns, type StageView } from './scene'
 import {
   PING_MS,
   PROTOCOL,
@@ -18,6 +18,7 @@ import {
 } from './protocol'
 
 const PANE = 'pairplay'
+const ICON: Record<Element, string> = { fire: '🔥', water: '💧', nature: '🌿' }
 
 const room = atom({ plugin: 'pairplay', key: 'room' } as const, null, { shape: 'room-1' })
 const peers = atom({ plugin: 'pairplay', key: 'peers' } as const, {}, { shape: 'peers-1' })
@@ -26,6 +27,8 @@ const conn = atom({ plugin: 'pairplay', key: 'conn' } as const, 'off' as Conn)
 const game = atom({ plugin: 'pairplay', key: 'game' } as const, INITIAL_DUEL, { shape: 'duel-1' })
 // Host only: the round's hidden picks, never broadcast.
 const picks = atom({ plugin: 'pairplay', key: 'picks' } as const, {})
+// Guest only: what this player cast this round, for the icon over their head.
+const mine = atom({ plugin: 'pairplay', key: 'mine' } as const, null)
 
 const HELP = [
   '/coop host          create a room, share the code',
@@ -47,9 +50,10 @@ let generation = 0
 let stream: AsyncGenerator<unknown, unknown> | undefined
 let pinger: { cancel(): void } | undefined
 let backoffMs = 1000
-// The round animation: transient, so a module variable; blits drive it, no redraws.
+// The stage loop: one timer while in a room, blitting a frame each tick (idle
+// stars and blinks, or the round in `anim`). Transient, so module variables.
 let anim: { t0: number } | undefined
-let animTimer: { cancel(): void } | undefined
+let loop: { cancel(): void } | undefined
 let stageCols = 0
 
 async function addLog($: $, who: string, text: string, kind: LogLine['kind'] = 'info') {
@@ -170,31 +174,59 @@ async function hostApply($: $, id: string, name: string, intent: unknown) {
 /** A round just resolved: play it. A first snapshot (joining late) is not replayed. */
 async function onDuelChange($: $, before: Duel, after: Duel) {
   if (before.seq === 0 || !after.last || after.last.round === before.last?.round) return
-  animTimer?.cancel()
   anim = { t0: await $.clock.now() }
-  animTimer = $.clock.every(FRAME_MS, () => void tick($))
+  startLoop($)
   await tick($)
 }
 
+function startLoop($: $) {
+  loop ??= $.clock.every(FRAME_MS, () => void tick($))
+}
+
+function stopLoop() {
+  loop?.cancel()
+  loop = undefined
+  anim = undefined
+}
+
+async function stageView($: $, d: Duel): Promise<StageView> {
+  const now = await $.clock.now()
+  const t = anim ? now - anim.t0 : undefined
+  let myPick: Element | undefined
+  if (d.players[me]?.picked) {
+    if (await isHost($)) myPick = (await read($, picks))[me]
+    else {
+      const m = await read($, mine)
+      if (m?.round === d.round) myPick = m.element
+    }
+  }
+  return { me, now, ...(t !== undefined ? { t } : {}), ...(myPick ? { myPick } : {}) }
+}
+
 async function tick($: $) {
-  if (!anim) return
-  const t = Math.min(1, ((await $.clock.now()) - anim.t0) / ANIM_MS)
-  const res = stageCols
-    ? await $.ui.blit({ requestId: PANE, key: 'stage', cells: encodeCells(drawStage(await read($, game), stageCols, t), stageCols, STAGE_PX_H) })
-    : { deny: 'no stage' }
-  if (t >= 1 || res.deny) {
-    // Done, or the pane is closed or resized: settle on the final drawing.
-    animTimer?.cancel()
-    animTimer = undefined
+  if (!stageCols) return
+  const d = await read($, game)
+  const view = await stageView($, d)
+  if (anim && view.t !== undefined && view.t >= roundMs(d)) {
+    // The round has played: settle on the drawing that shows its result.
     anim = undefined
     $.ui.invalidate('ui.render')
+    return
   }
+  // Denied while the pane is closed: nothing to paint, the loop just idles.
+  await $.ui.blit({ requestId: PANE, key: 'stage', cells: encodeCells(drawStage(d, stageCols, view), stageCols, STAGE_PX_H) })
 }
 
 async function act($: $, intent: { kind: 'cast'; element: string } | { kind: 'rematch' }) {
   if (!(await read($, room))) return 'Not in a room.'
   if (!(await isHost($))) {
-    return (await send($, 'intent', intent)) ? `${describe(intent)} sent to host` : 'Send failed, see pane.'
+    if (!(await send($, 'intent', intent))) return 'Send failed, see pane.'
+    if (intent.kind === 'cast' && isElement(intent.element)) {
+      const element = intent.element
+      const round = (await read($, game)).round
+      await update($, mine, () => ({ round, element }))
+    }
+    return `${describe(intent)} sent to host`
   }
   const d = await hostApply($, me, myName, intent)
   if (!d) return `${describe(intent)}: not allowed now`
@@ -265,6 +297,7 @@ async function subscribe($: $, gen: number) {
 
 function stop() {
   generation++
+  stopLoop()
   pinger?.cancel()
   pinger = undefined
   void stream?.return(undefined)
@@ -278,6 +311,7 @@ async function start($: $) {
   void subscribe($, gen)
   // Announce once the stream had a moment to open, so the answer isn't missed.
   $.clock.after(1500, () => void send($, 'hello'))
+  startLoop($)
   pinger = $.clock.every(PING_MS, () => {
     void send($, 'ping')
     void refreshStatus($)
@@ -337,7 +371,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
-    animTimer?.cancel()
+    stopLoop()
     if (await read($, room)) await send($, 'bye')
     stop()
     return next(e)
@@ -387,7 +421,7 @@ export const register: Register = (on, options) => {
     const lines = await read($, log)
     const g = await read($, game)
     const playing = anim !== undefined
-    const t = anim ? Math.min(1, ((await $.clock.now()) - anim.t0) / ANIM_MS) : undefined
+    const view = await stageView($, g)
     stageCols = Raster ? stageColumns(e.props.bodyColumns) : 0
     const color = (id: string) => (id === Object.keys(g.players)[0] ? '#7f9cff' : '#ff6f86')
     const rows = Math.max(3, (e.viewport?.rows ?? 24) - 8 - (Raster ? STAGE_ROWS + 1 : 0))
@@ -411,7 +445,7 @@ export const register: Register = (on, options) => {
                 key="stage"
                 columns={stageCols}
                 rows={STAGE_ROWS}
-                cells={encodeCells(drawStage(g, stageCols, t), stageCols, STAGE_PX_H)}
+                cells={encodeCells(drawStage(g, stageCols, view), stageCols, STAGE_PX_H)}
               />
             )}
             {Raster ? (
@@ -420,7 +454,7 @@ export const register: Register = (on, options) => {
                   <Text>
                     {i > 0 ? '   ' : ''}
                     <Text color={color(id)} bold>{id === me ? `${p.name} (you)` : p.name}</Text>{' '}
-                    <Text dimColor>{playing || g.winner ? '' : p.picked ? 'picked' : 'thinking…'}</Text>
+                    <Text dimColor>{playing || g.winner ? '' : p.picked ? '✦' : '…'}</Text>
                   </Text>
                 ))}
               </Text>
@@ -436,12 +470,12 @@ export const register: Register = (on, options) => {
             {g.last && !playing && <Text dimColor>{roundText(g)}</Text>}
             <Box flexDirection="row" gap={1}>
               {g.winner ? (
-                <Button key="rematch" label="rematch" hotkey="r" onPress={() => void act($, { kind: 'rematch' })} />
+                <Button key="rematch" label="⚔ rematch" hotkey="r" onPress={() => void act($, { kind: 'rematch' })} />
               ) : (
                 ELEMENTS.map((el, i) => (
                   <Button
                     key={el}
-                    label={el}
+                    label={ICON[el]}
                     hotkey={String(i + 1)}
                     onPress={() => void act($, { kind: 'cast', element: el })}
                   />

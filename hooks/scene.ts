@@ -1,31 +1,60 @@
 // The duel stage, pure: pixels for a Raster of half blocks (two pixels a cell).
-// drawStage(duel, width, t) paints the idle scene, or the round in duel.last at
-// animation time t in [0, 1]. Host stands left, guest right, on both screens.
+// drawStage(duel, width, view) paints the scene at `view.now` (idle loop), or the
+// round in duel.last `view.t` ms into its animation. Host left, guest right, on
+// both screens; every random thing is seeded by the round, so both play alike.
 
 import type { Duel, Element } from '../types'
 
-export const STAGE_ROWS = 12
+export const STAGE_ROWS = 14
 export const STAGE_PX_H = STAGE_ROWS * 2
-export const ANIM_MS = 2200
 export const FRAME_MS = 66
+export const GROUND_Y = 25
+export const SPRITE_TOP = 8
+const SPRITE_H = 17
 
-const GROUND_Y = 22
-const SPRITE_TOP = 5
+// Round timeline, ms from the start of the animation.
+const CHARGE_END = 350
+const TRAVEL_END = 1150
+const CLASH_END = 1450
+const TIE_END = 2200
+const PUSH_END = 1900
+const IMPACT_END = 2600
+const FALL_END = 3200
+const VICTORY_AT = 3000
+const KO_AT = 3300
+const DEATH_END = 5200
 
-// 0 is "no pixel": the terminal's own background shows through.
 export const COLORS = {
   host: { H: 0x3355dd, h: 0xffdd33, S: 0xf2c9a0, E: 0x222222, B: 0xeeeeee, R: 0x2b44b8, r: 0x1c2f80, T: 0x8b5a2b, O: 0x99ddff },
-  guest: { H: 0x7a1f3d, h: 0xffaa33, S: 0xe0b090, E: 0x222222, L: 0x3a2a1a, R: 0xc0304a, r: 0x80203a, T: 0x6b4a2b, O: 0xffcc88 },
+  guest: { H: 0x7a1f3d, h: 0xffaa33, S: 0xe0b090, E: 0x221111, L: 0x3a2a1a, R: 0xc0304a, r: 0x80203a, T: 0x6b4a2b, O: 0xffcc88 },
   spell: {
-    fire: [0xffee66, 0xff7a1a, 0xc02810],
-    water: [0xe0ffff, 0x44aaff, 0x1f5fd0],
-    nature: [0xeaffb0, 0x66cc33, 0x2f7a1f],
-  } satisfies Record<Element, [number, number, number]>,
+    fire: [0xfff3a0, 0xffc23a, 0xff7a1a, 0xd8401a, 0x9c2a14],
+    water: [0xf0ffff, 0xa8e4ff, 0x4fb0ff, 0x2a78e0, 0x1c4fa8],
+    nature: [0xf0ffc0, 0xa6e05a, 0x5fbf3a, 0x3a8f2a, 0x24601e],
+  } satisfies Record<Element, readonly number[]>,
+  smoke: [0x6a6470, 0x4a4552],
+  thorn: 0x7a5020,
+  petal: 0xff9ad5,
+  icon: { fire: 0xff8c1f, water: 0x5cc8ff, nature: 0x7ad65a } satisfies Record<Element, number>,
+  iconShade: { fire: 0xffe066, water: 0xffffff, nature: 0x3f8f2f } satisfies Record<Element, number>,
+  rune: 0xc58cff,
+  runeGlow: 0x5a3a8a,
   orbPicked: 0xffffff,
   heart: 0xe8334a,
   heartLost: 0x444444,
   hit: 0xff2244,
-  ground: [0x3d2f4f, 0x2a2036],
+  dmg: 0xff5060,
+  blood: [0x8a0000, 0xb3000c, 0xd4101c, 0x5c0000],
+  ko: 0xffe14a,
+  koEdge: 0x2a0a00,
+  spark: [0xfff6a0, 0xfffffe],
+  moon: 0xf3f0d2,
+  crater: 0xc9c6a8,
+  star: [0xfffbe0, 0x9aa0c8],
+  hills: [0x1c1430, 0x241a3c],
+  grass: [0x2e6a2a, 0x3b7f33],
+  dirt: [0x4a3222, 0x3a271a],
+  firefly: 0xe6ff80,
 }
 
 // Facing right; the guest is drawn mirrored so both staffs face the middle.
@@ -70,148 +99,646 @@ export const SPRITES = {
   ],
 }
 const SPRITE_W = SPRITES.host[0]!.length
+
+const ICONS: Record<Element, string[]> = {
+  fire: ['..a..', '.aa..', '.aba.', 'abbba', 'abwba', '.aaa.'],
+  water: ['..a..', '..a..', '.aaa.', 'aawaa', 'aaaaa', '.aaa.'],
+  nature: ['...aa', '..aaa', '.aaba', 'aaba.', 'ab...', 'b....'],
+}
+const RUNE = ['XXX', '..X', '.XX', '...', '.X.']
 const HEART = ['X.X', 'XXX', '.X.']
+const GLYPHS: Record<string, string[]> = {
+  K: ['X.X', 'X.X', 'XX.', 'X.X', 'X.X'],
+  O: ['XXX', 'X.X', 'X.X', 'X.X', 'XXX'],
+  '!': ['X', 'X', 'X', '.', 'X'],
+  '-': ['...', '...', 'XXX', '...', '...'],
+  '1': ['.X.', 'XX.', '.X.', '.X.', 'XXX'],
+}
+
+export type StageView = {
+  /** The viewer's player id: whose pick may be shown as an icon. */
+  me?: string
+  /** The viewer's own pick this round, when they have cast. */
+  myPick?: Element
+  /** Clock time, ms: drives the idle loop (stars, blinks, victory hops). */
+  now: number
+  /** Ms into the round animation of duel.last; absent when idle. */
+  t?: number
+}
 
 export function stageColumns(bodyColumns: number) {
   return Math.max(30, Math.min(64, Math.floor(bodyColumns)))
 }
 
-type Canvas = { w: number; px: Uint32Array }
+/** How long the animation of duel.last runs. */
+export function roundMs(duel: Duel) {
+  const last = duel.last
+  if (!last || last.loser === null) return TIE_END
+  return duel.winner !== undefined ? DEATH_END : IMPACT_END
+}
+
+// ─── drawing primitives ──────────────────────────────────────────────────────
+
+type Canvas = { w: number; px: Uint32Array; ox: number; oy: number }
+type Pt = { x: number; y: number }
+type Side = 'host' | 'guest'
 
 function put(c: Canvas, x: number, y: number, color: number) {
-  x = Math.round(x)
-  y = Math.round(y)
+  x = Math.round(x + c.ox)
+  y = Math.round(y + c.oy)
   if (x >= 0 && x < c.w && y >= 0 && y < STAGE_PX_H) c.px[y * c.w + x] = color
 }
 
-function grey(color: number) {
-  const v = Math.round(((color >> 16) & 255) * 0.3 + ((color >> 8) & 255) * 0.59 + (color & 255) * 0.11) * 0.6
-  const g = Math.round(v)
-  return (g << 16) | (g << 8) | g
+/** Deterministic noise in [0, 1): both screens draw the same particles. */
+function rnd(...n: number[]) {
+  let h = 2166136261
+  for (const v of n) {
+    h ^= Math.floor(v * 1000) | 0
+    h = Math.imul(h, 16777619)
+    h ^= h >>> 13
+  }
+  h = Math.imul(h ^ (h >>> 16), 2246822507)
+  return ((h ^ (h >>> 13)) >>> 0) / 4294967296
 }
 
-function sprite(c: Canvas, side: 'host' | 'guest', x0: number, opts: { orb: number; grey: boolean }) {
-  const rows = SPRITES[side]
+const clamp01 = (k: number) => Math.max(0, Math.min(1, k))
+const lerp = (a: number, b: number, k: number) => a + (b - a) * clamp01(k)
+const phase = (t: number, from: number, to: number) => clamp01((t - from) / (to - from))
+const pick = <T,>(xs: readonly T[], k: number) => xs[Math.min(xs.length - 1, Math.max(0, Math.floor(k * xs.length)))]!
+
+function mix(a: number, b: number, k: number) {
+  const ch = (s: number) => Math.round(lerp((a >> s) & 255, (b >> s) & 255, k))
+  return (ch(16) << 16) | (ch(8) << 8) | ch(0)
+}
+
+function blob(c: Canvas, cx: number, cy: number, r: number, color: (d: number) => number) {
+  for (let y = Math.floor(cy - r - 1); y <= Math.ceil(cy + r + 1); y++) {
+    for (let x = Math.floor(cx - r - 1); x <= Math.ceil(cx + r + 1); x++) {
+      const d = Math.hypot(x - cx, y - cy) / Math.max(r, 0.01)
+      if (d <= 1) put(c, x, y, color(d))
+    }
+  }
+}
+
+function glyphs(c: Canvas, rows: string[], x0: number, y0: number, color: number, scale = 1) {
+  rows.forEach((row, y) =>
+    [...row].forEach((ch, x) => {
+      if (ch !== 'X') return
+      for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) put(c, x0 + x * scale + sx, y0 + y * scale + sy, color)
+    }),
+  )
+}
+
+function text(c: Canvas, s: string, x0: number, y0: number, color: number, edge: number | null, scale = 1) {
+  const draw = (dx: number, dy: number, col: number) => {
+    let x = x0
+    for (const ch of s) {
+      const g = GLYPHS[ch]!
+      glyphs(c, g, x + dx, y0 + dy, col, scale)
+      x += (g[0]!.length + 1) * scale
+    }
+  }
+  if (edge !== null) for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1], [1, 1]] as const) draw(dx, dy, edge)
+  draw(0, 0, color)
+}
+
+function textWidth(s: string, scale = 1) {
+  return [...s].reduce((w, ch) => w + (GLYPHS[ch]![0]!.length + 1) * scale, -scale)
+}
+
+// ─── scenery ─────────────────────────────────────────────────────────────────
+
+function backdrop(c: Canvas, now: number, flash: number) {
+  const w = c.w
+  for (let y = 0; y < GROUND_Y; y++) {
+    const sky = mix(0x0a0c24, 0x2b1a45, y / GROUND_Y)
+    const col = flash > 0 ? mix(sky, 0xffffff, flash) : sky
+    for (let x = 0; x < w; x++) c.px[y * w + x] = col
+  }
+  if (flash < 0.5) {
+    for (let i = 0; i < Math.floor(w / 3); i++) {
+      const x = Math.floor(rnd(i, 1) * w)
+      const y = Math.floor(rnd(i, 2) * 15)
+      const tw = Math.sin(now / 700 + rnd(i, 3) * 6.28)
+      if (tw > -0.3) c.px[y * w + x] = tw > 0.6 ? COLORS.star[0]! : COLORS.star[1]!
+    }
+    const mx = Math.floor(w / 2) - 1
+    for (let y = 1; y <= 7; y++) {
+      for (let x = mx - 3; x <= mx + 3; x++) {
+        const d = Math.hypot(x - mx, y - 4)
+        if (d <= 2.6) c.px[y * w + x] = (x === mx - 1 && y === 3) || (x === mx + 1 && y === 5) ? COLORS.crater : COLORS.moon
+      }
+    }
+  }
+  // Hills on the horizon.
+  for (let x = 0; x < w; x++) {
+    const top = GROUND_Y - 2 - Math.floor(3 * (Math.sin(x * 0.35) * 0.5 + 0.5) + 2 * rnd(x, 9))
+    for (let y = top; y < GROUND_Y; y++) c.px[y * w + x] = y === top ? COLORS.hills[1]! : COLORS.hills[0]!
+  }
+  for (let x = 0; x < w; x++) {
+    c.px[GROUND_Y * w + x] = rnd(x, 4) > 0.5 ? COLORS.grass[0]! : COLORS.grass[1]!
+    c.px[(GROUND_Y + 1) * w + x] = COLORS.dirt[0]!
+    c.px[(GROUND_Y + 2) * w + x] = rnd(x, 5) > 0.7 ? COLORS.dirt[0]! : COLORS.dirt[1]!
+    if (rnd(x, 6) > 0.75) c.px[(GROUND_Y - 1) * w + x] = COLORS.grass[1]!
+  }
+}
+
+function fireflies(c: Canvas, now: number) {
+  for (let i = 0; i < 4; i++) {
+    const x = (rnd(i, 21) * c.w + now * 0.004 * (rnd(i, 22) - 0.5)) % c.w
+    const y = 18 + Math.sin(now / 900 + i * 2) * 2.5
+    if (Math.sin(now / 400 + i * 1.7) > -0.2) put(c, (x + c.w) % c.w, y, COLORS.firefly)
+  }
+}
+
+// ─── wizards ─────────────────────────────────────────────────────────────────
+
+type Pose = {
+  orb: number
+  tint?: number
+  blink?: boolean
+  /** Staff raised overhead, arm up. */
+  victory?: boolean
+  /** Fallen forward by this many radians (0 standing, π/2 flat). */
+  fall?: number
+  dy?: number
+}
+
+function spriteRows(side: Side) {
+  return side === 'guest' ? SPRITES.guest.map(r => [...r].reverse().join('')) : SPRITES.host
+}
+
+function pixelColor(side: Side, ch: string, pose: Pose) {
   const pal = COLORS[side] as Record<string, number>
-  rows.forEach((row, y) => {
-    const cols = side === 'guest' ? [...row].reverse() : [...row]
-    cols.forEach((ch, x) => {
+  if (ch === 'O') return pose.orb
+  if (ch === 'E' && pose.blink) return pal.S!
+  return pose.tint ?? pal[ch]!
+}
+
+function wizard(c: Canvas, side: Side, x0: number, pose: Pose) {
+  const rows = spriteRows(side)
+  const dir = side === 'host' ? 1 : -1
+  const top = SPRITE_TOP + (pose.dy ?? 0)
+  if (pose.fall) return fallen(c, side, rows, x0, pose)
+  const front = side === 'host' ? 10 : 0
+  rows.forEach((row, y) =>
+    [...row].forEach((ch, x) => {
       if (ch === '.') return
-      const color = ch === 'O' ? opts.orb : pal[ch]!
-      put(c, x0 + x, SPRITE_TOP + y, opts.grey ? grey(color) : color)
-    })
-  })
+      // The victory pose draws its own staff and arm.
+      if (pose.victory && (x === front || (y === 10 && x === front - dir))) return
+      put(c, x0 + x, top + y, pixelColor(side, ch, pose))
+    }),
+  )
+  if (!pose.victory) return
+  const pal = COLORS[side]
+  const fx = x0 + front
+  for (let y = -4; y <= 12; y++) put(c, fx, top + y, pose.tint ?? pal.T)
+  for (const [x, y] of [[-dir, 9], [-dir, 8], [0, 7]] as const) put(c, fx + x, top + y, pose.tint ?? pal.R)
+  put(c, fx, top + 6, pose.tint ?? pal.S)
+  put(c, fx, top - 5, pose.orb)
+}
+
+/** Rotates the sprite about its front foot: it topples toward the middle, face down. */
+function fallen(c: Canvas, side: Side, rows: string[], x0: number, pose: Pose) {
+  const dir = side === 'host' ? 1 : -1
+  const a = (pose.fall ?? 0) * dir
+  const cos = Math.cos(a)
+  const sin = Math.sin(a)
+  const pl = side === 'host' ? SPRITE_W : 0
+  const pw = { x: x0 + pl, y: SPRITE_TOP + SPRITE_H }
+  for (let y = SPRITE_TOP - 4; y <= GROUND_Y; y++) {
+    for (let x = x0 - SPRITE_H - 2; x <= x0 + SPRITE_W + SPRITE_H + 2; x++) {
+      const vx = x + 0.5 - pw.x
+      const vy = y + 0.5 - pw.y
+      // Inverse rotation back into the sprite.
+      const sx = Math.floor(pl + vx * cos + vy * sin)
+      const sy = Math.floor(SPRITE_H - vx * sin + vy * cos)
+      const ch = rows[sy]?.[sx]
+      if (!ch || ch === '.') continue
+      put(c, x, y, pixelColor(side, ch, pose))
+    }
+  }
+}
+
+/** Where a point of the standing sprite ends up once fallen by `fall`. */
+function fallenPoint(side: Side, x0: number, local: Pt, fall: number): Pt {
+  const dir = side === 'host' ? 1 : -1
+  const a = fall * dir
+  const pl = side === 'host' ? SPRITE_W : 0
+  const vx = local.x - pl
+  const vy = local.y - SPRITE_H
+  return {
+    x: x0 + pl + vx * Math.cos(a) - vy * Math.sin(a),
+    y: SPRITE_TOP + SPRITE_H + vx * Math.sin(a) + vy * Math.cos(a),
+  }
 }
 
 function hearts(c: Canvas, x0: number, life: number) {
   for (let i = 0; i < 3; i++) {
     const color = i < life ? COLORS.heart : COLORS.heartLost
-    HEART.forEach((row, y) => [...row].forEach((ch, x) => ch === 'X' && put(c, x0 + i * 4 + x, 1 + y, color)))
+    HEART.forEach((row, y) => [...row].forEach((ch, x) => ch === 'X' && put(c, x0 + i * 4 + x, y, color)))
   }
 }
 
-function orb(c: Canvas, cx: number, cy: number, r: number, pal: readonly number[]) {
-  for (let y = Math.floor(cy - r); y <= Math.ceil(cy + r); y++) {
-    for (let x = Math.floor(cx - r); x <= Math.ceil(cx + r); x++) {
-      const d = Math.hypot(x - cx, y - cy)
-      if (d <= r) put(c, x, y, d <= r * 0.4 ? pal[0]! : d <= r * 0.75 ? pal[1]! : pal[2]!)
+function icon(c: Canvas, el: Element, x0: number, y0: number) {
+  ICONS[el].forEach((row, y) =>
+    [...row].forEach((ch, x) => {
+      if (ch === '.') return
+      const color = ch === 'a' ? COLORS.icon[el] : ch === 'b' ? COLORS.iconShade[el] : 0xffffff
+      put(c, x0 + x, y0 + y, color)
+    }),
+  )
+}
+
+function rune(c: Canvas, x0: number, y0: number, now: number) {
+  if (Math.sin(now / 250) > 0) {
+    for (let y = -1; y <= 5; y++) for (let x = -1; x <= 3; x++) put(c, x0 + x, y0 + y, COLORS.runeGlow)
+  }
+  glyphs(c, RUNE, x0, y0, COLORS.rune)
+}
+
+// ─── spells ──────────────────────────────────────────────────────────────────
+
+function charge(c: Canvas, el: Element, tip: Pt, body: Pt, k: number, t: number, seed: number) {
+  const pal = COLORS.spell[el]
+  if (el === 'fire') {
+    blob(c, tip.x, tip.y, 0.8 + k * 1.2, d => pick(pal, d * 0.6))
+    for (let i = 0; i < 10; i++) {
+      const p = (t / 300 + rnd(seed, i, 1)) % 1
+      put(c, tip.x + (rnd(seed, i, 2) - 0.5) * 3, tip.y - p * 6, p > 0.8 ? COLORS.smoke[0]! : pick(pal, p))
+    }
+  } else if (el === 'water') {
+    for (let i = 0; i < 10; i++) {
+      const ang = i * 0.63 + t * 0.012
+      const r = (1 - k) * 6 + 0.5 + (i % 3)
+      put(c, tip.x + Math.cos(ang) * r, tip.y + Math.sin(ang) * r * 0.7, pal[1 + (i % 3)]!)
+    }
+    blob(c, tip.x, tip.y, 0.6 + k, d => (d < 0.5 ? pal[0]! : pal[2]!))
+  } else {
+    for (let i = 0; i < 7; i++) {
+      const ang = i * 0.9 + t * 0.01
+      put(c, body.x + Math.cos(ang) * 6, body.y + Math.sin(ang) * 4, pal[1 + (i % 3)]!)
+    }
+    for (let i = 0; i < 4; i++) put(c, body.x - 4 + i * 3, GROUND_Y - 1 - Math.round(k * 2 * rnd(seed, i)), pal[3]!)
+    put(c, tip.x, tip.y, pal[1]!)
+  }
+}
+
+function fireball(c: Canvas, head: Pt, dir: number, t: number, seed: number, r = 2.6) {
+  const pal = COLORS.spell.fire
+  for (let i = 14; i >= 1; i--) {
+    const age = i / 14
+    const jitter = (rnd(seed, i, Math.floor(t / 66)) - 0.5) * 2
+    const color = age > 0.75 ? COLORS.smoke[age > 0.9 ? 1 : 0]! : pick(pal.slice(1), age * 1.3)
+    put(c, head.x - dir * i * 0.9, head.y - age * 3 + jitter * age, color)
+  }
+  for (let y = Math.floor(head.y - r - 2); y <= Math.ceil(head.y + r + 2); y++) {
+    for (let x = Math.floor(head.x - r - 2); x <= Math.ceil(head.x + r + 2); x++) {
+      const dx = x - head.x
+      const dy = y - head.y
+      const flicker = rnd(seed, x, y, Math.floor(t / 66)) * 0.9
+      const d = Math.hypot(dx, dy) / (r + flicker - (dx * dir < 0 ? 0 : 0.4))
+      if (d <= 1) put(c, x, y, d < 0.35 ? pal[0]! : d < 0.6 ? pal[1]! : d < 0.85 ? pal[2]! : pal[3]!)
     }
   }
 }
 
-function ring(c: Canvas, cx: number, cy: number, r: number, color: number) {
-  for (let a = 0; a < 24; a++) {
-    const ang = (a / 24) * Math.PI * 2
-    put(c, cx + Math.cos(ang) * r, cy + Math.sin(ang) * r * 0.7, color)
+function torrent(c: Canvas, from: Pt, head: Pt, t: number, seed: number) {
+  const pal = COLORS.spell.water
+  const len = Math.abs(head.x - from.x)
+  const dir = Math.sign(head.x - from.x) || 1
+  for (let s = 0; s <= len; s++) {
+    const k = len ? s / len : 1
+    const env = Math.sin(k * Math.PI) * 1.6 + 0.3
+    const x = from.x + dir * s
+    const y = lerp(from.y, head.y, k) + Math.sin(s * 0.55 - t * 0.018) * env
+    put(c, x, y - 1, pal[1]!)
+    put(c, x, y, pal[2]!)
+    put(c, x, y + 1, pal[3]!)
+    if (rnd(seed, s, Math.floor(t / 132)) > 0.85) put(c, x, y - 1, pal[0]!)
+  }
+  for (let i = 0; i < 8; i++) {
+    const s = rnd(seed, i, 7) * len
+    const age = (t / 500 + rnd(seed, i, 8)) % 1
+    put(c, from.x + dir * s, lerp(from.y, head.y, len ? s / len : 1) + 2 + age * age * 9, pal[2]!)
+  }
+  blob(c, head.x, head.y, 2.2, d => (d < 0.4 ? pal[0]! : d < 0.75 ? pal[1]! : pal[2]!))
+}
+
+function vine(c: Canvas, fromX: number, toX: number, t: number, seed: number) {
+  const pal = COLORS.spell.nature
+  const dir = Math.sign(toX - fromX) || 1
+  const len = Math.abs(toX - fromX)
+  for (let s = 0; s <= len; s++) {
+    const x = fromX + dir * s
+    const y = GROUND_Y - 1 - (Math.sin(s * 0.7 + seed) > 0.3 ? 1 : 0)
+    put(c, x, y, pal[3]!)
+    put(c, x, y + 1, pal[4]!)
+    if (s % 4 === 2) {
+      put(c, x, y - 1, rnd(seed, s) > 0.5 ? pal[1]! : pal[2]!)
+      put(c, x + dir, y - 2, pal[1]!)
+    }
+    if (s % 6 === 5) put(c, x, y - 1, COLORS.thorn)
+  }
+  const sway = Math.sin(t / 80) > 0 ? 1 : 0
+  put(c, toX, GROUND_Y - 2 - sway, pal[0]!)
+  put(c, toX + dir, GROUND_Y - 3, COLORS.thorn)
+}
+
+/** One spell in flight, its head at `head`; `from` is where it left the caster. */
+function travel(c: Canvas, el: Element, from: Pt, head: Pt, t: number, seed: number) {
+  const dir = Math.sign(head.x - from.x) || 1
+  if (el === 'fire') fireball(c, head, dir, t, seed)
+  else if (el === 'water') torrent(c, from, head, t, seed)
+  else vine(c, from.x, head.x, t, seed)
+}
+
+function burst(c: Canvas, at: Pt, k: number, pals: (readonly number[])[], seed: number) {
+  if (k < 0.25) blob(c, at.x, at.y, 1 + k * 8, () => 0xffffff)
+  const r = 1.5 + k * 7
+  for (let a = 0; a < 28; a++) {
+    const ang = (a / 28) * Math.PI * 2
+    put(c, at.x + Math.cos(ang) * r, at.y + Math.sin(ang) * r * 0.6, pals[a % pals.length]![1]!)
+  }
+  for (let i = 0; i < 26; i++) {
+    const ang = rnd(seed, i, 31) * Math.PI * 2
+    const v = 6 + rnd(seed, i, 32) * 8
+    const x = at.x + Math.cos(ang) * v * k
+    const y = at.y + Math.sin(ang) * v * k * 0.7 + 10 * k * k
+    put(c, x, y, pick(pals[i % pals.length]!, 0.2 + k * 0.7))
   }
 }
 
-const lerp = (a: number, b: number, k: number) => a + (b - a) * Math.max(0, Math.min(1, k))
-const phase = (t: number, from: number, to: number) => (t - from) / (to - from)
+function impact(c: Canvas, el: Element, at: Pt, k: number, t: number, seed: number) {
+  const pal = COLORS.spell[el]
+  if (el === 'fire') {
+    if (k < 0.5) blob(c, at.x, at.y, 2 + k * 9, d => pick(pal, d * (0.5 + k)))
+    for (let i = 0; i < 20; i++) {
+      const ang = rnd(seed, i, 41) * Math.PI * 2
+      const v = 5 + rnd(seed, i, 42) * 9
+      put(c, at.x + Math.cos(ang) * v * k, at.y + Math.sin(ang) * v * k * 0.8 + 9 * k * k, pick(pal, 0.3 + k * 0.7))
+    }
+    for (let i = 0; i < 6; i++) blob(c, at.x + (rnd(seed, i, 43) - 0.5) * 8, at.y - k * 7 - i, 1.2 * k, () => COLORS.smoke[i % 2]!)
+  } else if (el === 'water') {
+    const r = 2 + k * 8
+    for (let x = -r; x <= r; x++) put(c, at.x + x, GROUND_Y - 1, Math.abs(x) > r - 1.5 ? pal[0]! : pal[2]!)
+    for (let i = 0; i < 24; i++) {
+      const vx = (rnd(seed, i, 51) - 0.5) * 16
+      const vy = -(4 + rnd(seed, i, 52) * 8)
+      const y = at.y + vy * k + 16 * k * k
+      if (y < GROUND_Y) put(c, at.x + vx * k, y, pal[1 + (i % 3)]!)
+    }
+  } else {
+    for (let n = 0; n < 3; n++) {
+      const h = Math.min(1, k * 1.6) * 15
+      for (let s = 0; s < h; s++) {
+        const x = at.x + Math.sin(s * 0.6 + n * 2.1) * (3 - n * 0.5)
+        const y = GROUND_Y - 1 - s
+        put(c, x, y, s % 5 === 4 ? COLORS.thorn : pal[2 + (n % 2)]!)
+        if (s % 4 === 1) put(c, x + (n % 2 ? 1 : -1), y, pal[1]!)
+      }
+    }
+    for (let i = 0; i < 8; i++) {
+      const p = (k + rnd(seed, i, 61)) % 1
+      put(c, at.x + (rnd(seed, i, 62) - 0.5) * 12, SPRITE_TOP + p * 14, i % 3 ? pal[0]! : COLORS.petal)
+    }
+  }
+}
 
-/** Pixels, row-major, width × STAGE_PX_H; 0 = empty. */
-export function drawStage(duel: Duel, width: number, t?: number): Uint32Array {
-  const c: Canvas = { w: width, px: new Uint32Array(width * STAGE_PX_H) }
-  const [hostId, guestId] = Object.keys(duel.players)
-  const ids = { host: hostId, guest: guestId }
-  const xs = { host: 1, guest: width - 1 - SPRITE_W }
-  // Staff tips: the 'O' pixel, guest mirrored.
-  const tips = {
+// ─── blood ───────────────────────────────────────────────────────────────────
+
+type Gush = { from: Pt; start: number; spread: number; count: number; every: number; seed: number }
+
+/** Particles flung from `from`, falling under gravity, staining where they land. */
+function gush(c: Canvas, g: Gush, t: number) {
+  const G = 0.00011
+  for (let i = 0; i < g.count; i++) {
+    const born = g.start + i * g.every
+    if (t < born) break
+    const age = t - born
+    const vx = (rnd(g.seed, i, 71) - 0.5) * g.spread
+    const vy = -(0.02 + rnd(g.seed, i, 72) * 0.045)
+    const color = COLORS.blood[i % COLORS.blood.length]!
+    // When it lands: from.y + vy*a + G/2*a² = ground.
+    const ground = GROUND_Y - 0.5
+    const dy = ground - g.from.y
+    const land = (-vy + Math.sqrt(vy * vy + 2 * G * dy)) / G
+    if (age < land) {
+      put(c, g.from.x + vx * age, g.from.y + vy * age + 0.5 * G * age * age, color)
+    } else {
+      const x = g.from.x + vx * land
+      put(c, x, GROUND_Y, color)
+      if (i % 3 === 0) put(c, x + 1, GROUND_Y, COLORS.blood[0]!)
+      if (i % 4 === 0) put(c, x, GROUND_Y - 1, COLORS.blood[1]!)
+    }
+  }
+}
+
+function pool(c: Canvas, cx: number, k: number) {
+  const hw = 1 + k * 13
+  for (let x = Math.floor(cx - hw); x <= Math.ceil(cx + hw); x++) {
+    const d = Math.abs(x - cx) / hw
+    if (d > 1) continue
+    put(c, x, GROUND_Y, d > 0.85 ? COLORS.blood[0]! : COLORS.blood[3]!)
+    if (d < 0.75) put(c, x, GROUND_Y + 1, COLORS.blood[0]!)
+    if (d < 0.6) put(c, x, GROUND_Y - 1, COLORS.blood[1]!)
+  }
+}
+
+/** Blood on the lens: splats that drip down over time. */
+function lensSplats(c: Canvas, k: number, now: number, seed: number) {
+  for (let i = 0; i < 6; i++) {
+    const x = 2 + rnd(seed, i, 81) * (c.w - 4)
+    const y = 2 + rnd(seed, i, 82) * 12
+    const r = 0.8 + rnd(seed, i, 83) * 1.8
+    blob(c, x, y, r * Math.min(1, k * 4), d => (d < 0.5 ? COLORS.blood[2]! : COLORS.blood[1]!))
+    const drip = Math.min(7, k * 12 * (0.5 + rnd(seed, i, 84)))
+    for (let s = 0; s < drip; s++) put(c, x + (i % 2 ? 0.4 : -0.4), y + r + s, COLORS.blood[s > drip - 2 ? 2 : 0]!)
+    // A fresh drop now and then, even long after.
+    const p = (now / 2600 + rnd(seed, i, 85)) % 1
+    if (k >= 1 && p < 0.5) put(c, x, y + r + drip + p * 6, COLORS.blood[2]!)
+  }
+}
+
+// ─── the stage ───────────────────────────────────────────────────────────────
+
+/** Pixels, row-major, width × STAGE_PX_H, every one painted. */
+export function drawStage(duel: Duel, width: number, view: StageView): Uint32Array {
+  const c: Canvas = { w: width, px: new Uint32Array(width * STAGE_PX_H), ox: 0, oy: 0 }
+  const ids = Object.keys(duel.players)
+  const id = { host: ids[0], guest: ids[1] } as Record<Side, string | undefined>
+  const xs: Record<Side, number> = { host: 2, guest: width - 2 - SPRITE_W }
+  const tips: Record<Side, Pt> = {
     host: { x: xs.host + 10, y: SPRITE_TOP + 4 },
     guest: { x: xs.guest, y: SPRITE_TOP + 3 },
   }
-  const last = t === undefined ? undefined : duel.last
-  const loserId = last?.loser ?? null
-  const loserSide = loserId === null ? null : loserId === hostId ? 'host' : 'guest'
-  const hitDone = last !== undefined && t !== undefined && t >= 0.85
+  const body = (side: Side): Pt => ({ x: xs[side] + SPRITE_W / 2, y: SPRITE_TOP + 9 })
+  const dirOf = (side: Side) => (side === 'host' ? 1 : -1)
+  const other = (side: Side): Side => (side === 'host' ? 'guest' : 'host')
+  const sideOf = (pid: string | null | undefined): Side | null =>
+    pid == null ? null : pid === id.host ? 'host' : pid === id.guest ? 'guest' : null
 
-  for (let x = 0; x < width; x++) {
-    put(c, x, GROUND_Y, COLORS.ground[0]!)
-    put(c, x, GROUND_Y + 1, COLORS.ground[1]!)
+  const t = view.t
+  const last = duel.last
+  const seed = (last?.round ?? duel.round) * 7919
+  const playing = t !== undefined && last !== undefined
+  const loser = sideOf(last?.loser)
+  const winnerSide = sideOf(duel.winner)
+  const deadSide = winnerSide ? other(winnerSide) : null
+  const lethal = playing && deadSide !== null && loser === deadSide
+  // Idle after a won duel: everything as the death animation left it.
+  const tt = playing ? t : deadSide ? DEATH_END : undefined
+  const clock = playing ? t : view.now
+
+  const flash = playing && t >= TRAVEL_END && t < TRAVEL_END + 100 ? 0.45 : 0
+  backdrop(c, view.now, flash)
+  if (!playing && !deadSide) fireflies(c, view.now)
+
+  const shaking = playing && ((t >= TRAVEL_END && t < CLASH_END) || (loser && t >= PUSH_END && t < PUSH_END + 260))
+  const shake = () => {
+    if (shaking) {
+      c.ox = Math.floor(t! / 50) % 2 ? 1 : -1
+      c.oy = Math.floor(t! / 75) % 2 ? 1 : 0
+    }
+  }
+  const still = () => {
+    c.ox = 0
+    c.oy = 0
   }
 
+  // Blood under everything else: the pool and what has landed.
+  const fallK = (tt ?? 0) < IMPACT_END ? 0 : phase(tt!, IMPACT_END, FALL_END)
+  const fall = deadSide && tt !== undefined && (lethal || !playing) ? fallAngle(fallK) : 0
+  if (deadSide && tt !== undefined && tt >= IMPACT_END) {
+    const neck = fallenPoint(deadSide, xs[deadSide], { x: 5, y: 7 }, fall)
+    pool(c, fallenPoint(deadSide, xs[deadSide], { x: 5, y: 12 }, Math.PI / 2).x, phase(tt, FALL_END - 200, DEATH_END - 400))
+    gush(c, { from: neck, start: IMPACT_END + 150, spread: 0.11, count: 150, every: 11, seed: seed + 1 }, tt)
+  }
+  // Every lost heart leaves a stain at the wizard's feet.
   for (const side of ['host', 'guest'] as const) {
-    const id = ids[side]
-    if (!id) continue
-    const p = duel.players[id]!
-    // Mid-animation the loser keeps the heart until the hit lands.
-    const life = last && side === loserSide && !hitDone ? p.life + 1 : p.life
-    hearts(c, xs[side], life)
-    const shake = last && side === loserSide && hitDone ? (Math.round(t! * 40) % 2 ? 1 : -1) : 0
-    const isLoser = t === undefined && duel.winner !== undefined && duel.winner !== id
-    const charging = last && t! < 0.5
-    const spellPal = last ? COLORS.spell[last.picks[id]!] : undefined
-    const orbColor = charging && spellPal ? spellPal[1]! : p.picked ? COLORS.orbPicked : COLORS[side].O
-    sprite(c, side, xs[side] + shake, { orb: orbColor, grey: isLoser })
+    const pid = id[side]
+    if (!pid) continue
+    const lost = 3 - duel.players[pid]!.life - (playing && side === loser && t < PUSH_END ? 1 : 0)
+    for (let i = 0; i < lost * 3; i++) put(c, body(side).x + (rnd(seed, side === 'host' ? 1 : 2, i) - 0.5) * 9, GROUND_Y, COLORS.blood[i % 2 ? 0 : 3]!)
   }
 
-  if (!last || t === undefined || !hostId || !guestId) return c.px
-  const midX = width / 2
-  const midY = 12
-  const pal = (side: 'host' | 'guest') => COLORS.spell[last.picks[ids[side]!]!]
+  shake()
+  for (const side of ['host', 'guest'] as const) {
+    const pid = id[side]
+    if (!pid) continue
+    const p = duel.players[pid]!
+    const hitDone = playing && side === loser && t >= PUSH_END
+    const life = playing && side === loser && !hitDone ? p.life + 1 : p.life
+    still()
+    hearts(c, xs[side], life)
+    shake()
 
-  if (t < 0.15) {
-    // Charge: the tips swell.
-    for (const side of ['host', 'guest'] as const) orb(c, tips[side].x, tips[side].y, lerp(0.5, 1.5, phase(t, 0, 0.15)), pal(side))
-  } else if (t < 0.5) {
-    // Fly: both orbs to the middle, leaving a short trail.
-    const k = phase(t, 0.15, 0.5)
-    for (const side of ['host', 'guest'] as const) {
-      const dir = side === 'host' ? 1 : -1
-      const x = lerp(tips[side].x, midX - dir * 2, k)
-      const y = lerp(tips[side].y, midY, k) - Math.sin(k * Math.PI) * 2
-      for (let i = 1; i <= 3; i++) put(c, x - dir * (i + 2), y, pal(side)[2]!)
-      orb(c, x, y, 2, pal(side))
-    }
-  } else if (t < 0.62) {
-    // Clash: rings of both colors burst in the middle.
-    const r = lerp(2, 5, phase(t, 0.5, 0.62))
-    ring(c, midX, midY, r, pal('host')[1]!)
-    ring(c, midX, midY, r - 1, pal('guest')[1]!)
-    orb(c, midX, midY, 1.5, [0xffffff, 0xffffff, 0xffffff])
-  } else if (loserSide === null) {
-    // Tie: sparks drift out and fade.
-    const k = phase(t, 0.62, 1)
-    for (let a = 0; a < 10; a++) {
-      const ang = (a / 10) * Math.PI * 2
-      const side = a % 2 ? 'host' : 'guest'
-      put(c, midX + Math.cos(ang) * lerp(5, 12, k), midY + Math.sin(ang) * lerp(3, 7, k), pal(side)[k < 0.6 ? 1 : 2]!)
-    }
-  } else {
-    const winnerSide = loserSide === 'host' ? 'guest' : 'host'
-    const target = { x: xs[loserSide] + SPRITE_W / 2, y: SPRITE_TOP + 9 }
-    if (t < 0.85) {
-      // The winning spell pushes through to the loser.
-      const k = phase(t, 0.62, 0.85)
-      orb(c, lerp(midX, target.x, k), lerp(midY, target.y, k), 2.5, pal(winnerSide))
+    const blink = (clock + (side === 'host' ? 0 : 1400)) % 3300 < 130
+    const flicker = rnd(seed, side === 'host' ? 3 : 4, Math.floor(clock / 200)) > 0.7
+    let orb: number = p.picked ? COLORS.orbPicked : flicker ? mix(COLORS[side].O, 0xffffff, 0.5) : COLORS[side].O
+    if (playing && t < CHARGE_END) orb = COLORS.spell[last.picks[pid]!]![1]!
+    const victorious = side === winnerSide && tt !== undefined && tt >= VICTORY_AT
+    const hop = victorious && Math.floor(clock / 350) % 2 === 0 ? -1 : 0
+    const tint = hitDone && t < PUSH_END + 300 && Math.floor(t / 66) % 2 === 0 ? COLORS.hit : undefined
+    if (side === deadSide && fall > 0) {
+      wizard(c, side, xs[side], { orb: COLORS[side].O, fall, ...(tint ? { tint } : {}) })
     } else {
-      // Hit: a red burst over the loser.
-      const k = phase(t, 0.85, 1)
-      ring(c, target.x, target.y, lerp(2, 6, k), COLORS.hit)
-      orb(c, target.x, target.y, lerp(2.5, 1, k), [COLORS.hit, pal(winnerSide)[1]!, COLORS.hit])
+      wizard(c, side, xs[side], {
+        orb: victorious ? COLORS.spark[0]! : orb,
+        blink,
+        dy: hop,
+        ...(victorious ? { victory: true } : {}),
+        ...(tint ? { tint } : {}),
+      })
     }
+    if (victorious) {
+      const o = { x: tips[side].x + (side === 'guest' ? 0 : 0), y: SPRITE_TOP - 5 + hop }
+      for (let i = 0; i < 6; i++) {
+        const ang = i * 1.05 + clock * 0.006
+        const r = 2 + (i % 2) * 1.5
+        put(c, o.x + Math.cos(ang) * r, o.y + Math.sin(ang) * r * 0.8, COLORS.spark[i % 2]!)
+      }
+    }
+
+    // Selection marks, only while waiting for picks.
+    if (!playing && !duel.winner && p.picked) {
+      still()
+      const ix = side === 'host' ? xs.host + 2 : xs.guest + 4
+      const bob = Math.sin(view.now / 300) > 0 ? 0 : 1
+      if (pid === view.me && view.myPick) icon(c, view.myPick, ix, 3 + bob)
+      else rune(c, ix + 1, 3 + bob, view.now)
+      shake()
+    }
+  }
+
+  if (playing && id.host && id.guest) {
+    const el = (side: Side) => last.picks[id[side]!]!
+    const midX = width / 2
+    const midY = SPRITE_TOP + 6
+    const start = (side: Side): Pt => (el(side) === 'nature' ? { x: body(side).x + dirOf(side) * 6, y: GROUND_Y - 1 } : tips[side])
+    const meet = (side: Side): Pt => (el(side) === 'nature' ? { x: midX - dirOf(side), y: GROUND_Y - 1 } : { x: midX - dirOf(side) * 2, y: midY })
+    if (t < CHARGE_END) {
+      for (const side of ['host', 'guest'] as const) charge(c, el(side), tips[side], body(side), t / CHARGE_END, t, seed)
+    } else if (t < TRAVEL_END) {
+      const k = phase(t, CHARGE_END, TRAVEL_END)
+      for (const side of ['host', 'guest'] as const) {
+        const from = start(side)
+        const to = meet(side)
+        const arc = el(side) === 'nature' ? 0 : Math.sin(k * Math.PI) * 3
+        travel(c, el(side), from, { x: lerp(from.x, to.x, k), y: lerp(from.y, to.y, k) - arc }, t, seed + (side === 'host' ? 10 : 20))
+      }
+    } else if (t < CLASH_END) {
+      const k = phase(t, TRAVEL_END, CLASH_END)
+      for (const side of ['host', 'guest'] as const) if (el(side) === 'water' && k < 0.4) torrent(c, start(side), meet(side), t, seed)
+      burst(c, { x: midX, y: midY }, k, [COLORS.spell[el('host')], COLORS.spell[el('guest')]], seed)
+    } else if (!loser) {
+      const k = phase(t, CLASH_END, TIE_END)
+      for (let i = 0; i < 16; i++) {
+        const ang = (i / 16) * Math.PI * 2
+        const pal = COLORS.spell[el(i % 2 ? 'host' : 'guest')]
+        const color = k > 0.7 ? COLORS.smoke[i % 2]! : pal[2]!
+        put(c, midX + Math.cos(ang) * lerp(6, 14, k), midY + Math.sin(ang) * lerp(3, 7, k) + k * k * 4, color)
+      }
+    } else {
+      const win = other(loser)
+      const target = el(win) === 'nature' ? { x: body(loser).x, y: GROUND_Y - 1 } : body(loser)
+      if (t < PUSH_END) {
+        const k = phase(t, CLASH_END, PUSH_END)
+        const from = el(win) === 'water' ? start(win) : meet(win)
+        const head = { x: lerp(meet(win).x, target.x, k), y: lerp(meet(win).y, target.y, k) }
+        travel(c, el(win), from, head, t, seed + 30)
+      } else if (t < IMPACT_END) {
+        const k = phase(t, PUSH_END, IMPACT_END)
+        impact(c, el(win), target, k, t, seed + 40)
+        still()
+        text(c, '-1', body(loser).x - 3, SPRITE_TOP - 2 - k * 6, COLORS.dmg, null)
+        shake()
+      }
+      // Even a graze bleeds.
+      if (t >= PUSH_END) {
+        gush(c, { from: body(loser), start: PUSH_END, spread: 0.06, count: 24, every: 8, seed: seed + 2 }, Math.min(t, IMPACT_END))
+      }
+    }
+  }
+
+  still()
+  if (deadSide && tt !== undefined && tt >= IMPACT_END + 300) {
+    lensSplats(c, phase(tt, IMPACT_END + 300, DEATH_END - 600), view.now, seed + 3)
+  }
+  if (deadSide && tt !== undefined && tt >= KO_AT) {
+    const k = phase(tt, KO_AT, KO_AT + 300)
+    const bounce = k < 1 ? (1 - k) * -14 : 0
+    text(c, 'KO!', Math.floor((width - textWidth('KO!', 2)) / 2), 3 + bounce, COLORS.ko, COLORS.koEdge, 2)
   }
   return c.px
+}
+
+/** Topples with gravity, a small bounce at the bottom. */
+function fallAngle(k: number) {
+  const flat = Math.PI / 2
+  if (k < 0.75) return flat * (k / 0.75) ** 2
+  const b = (k - 0.75) / 0.25
+  return flat - Math.sin(b * Math.PI) * 0.18
 }
 
 const DEFAULT = 0x01000000
