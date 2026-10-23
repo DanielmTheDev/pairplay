@@ -7,5 +7,5 @@
 
 ## Dev loop
 
-- User tests in two terminals: `claude --plugin-dir ~/git/pairplay` (hot-reloads on save; installed `pairplay@pairplay` disabled).
+- User tests in two terminals: `USER=alice|bob claude --plugin-dir ~/git/pairplay` (hot-reloads on save; installed `pairplay@pairplay` disabled).
 - Before handing off: `claude plugin validate .`, `claude plugin test .`, `tsc -p .`.

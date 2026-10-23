@@ -50,6 +50,21 @@ cloudflared tunnel --url http://localhost:8080
 
 Then `/config` → pairplay → Relay URL = the tunnel's `https://….trycloudflare.com`.
 
+## Develop
+
+Run from a checkout instead of the installed copy (disable that one first:
+`claude plugin disable pairplay@pairplay`). Saving a file hot-reloads the mod.
+To test both players on one machine, give each terminal its own name:
+
+```
+USER=alice claude --plugin-dir ~/git/pairplay
+USER=bob claude --plugin-dir ~/git/pairplay
+```
+
+The name comes from the Player name option, else `$USER`.
+
+Checks: `claude plugin validate .`, `claude plugin test .`, `tsc -p .`.
+
 ## License
 
 MIT
