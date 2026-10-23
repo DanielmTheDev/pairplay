@@ -1,4 +1,6 @@
-export type Room = { code: string; lastId?: string }
+export type Room = { code: string; lastId?: string; role?: 'host' | 'guest' }
+
+export type GameState = { seq: number; pokes: Record<string, number> }
 
 export type Peer = { name: string; lastSeen: number }
 
@@ -13,6 +15,7 @@ declare module 'claude-code' {
       peers: Shaped<Record<string, Peer>>
       log: Shaped<LogLine[]>
       conn: Conn
+      game: Shaped<GameState>
     }
   }
 }

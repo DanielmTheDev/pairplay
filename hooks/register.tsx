@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Conn, LogLine, Peer } from '../types'
+import { INITIAL_GAME, acceptSnapshot, applyIntent } from './game'
 import {
   PING_MS,
   PROTOCOL,
@@ -21,11 +22,13 @@ const room = atom({ plugin: 'pairplay', key: 'room' } as const, null, { shape: '
 const peers = atom({ plugin: 'pairplay', key: 'peers' } as const, {}, { shape: 'peers-1' })
 const log = atom({ plugin: 'pairplay', key: 'log' } as const, [], { shape: 'log-1' })
 const conn = atom({ plugin: 'pairplay', key: 'conn' } as const, 'off' as Conn)
+const game = atom({ plugin: 'pairplay', key: 'game' } as const, INITIAL_GAME, { shape: 'game-1' })
 
 const HELP = [
   '/coop host          create a room, share the code',
   '/coop join <code>   join the other player',
   '/coop say <text>    chat (or type in the pane)',
+  '/coop poke          bump your count (host decides)',
   '/coop leave         leave the room',
   '/coop               open the pane',
 ].join('\n')
@@ -92,6 +95,7 @@ async function handle($: $, env: Envelope) {
         $.ui.toast(`coop: ${env.name} joined`)
       }
       await send($, 'here')
+      if (await isHost($)) await send($, 'state', await read($, game))
       return
     case 'here':
     case 'ping':
@@ -115,7 +119,33 @@ async function handle($: $, env: Envelope) {
       $.ui.toast(`${env.name}: ${text}`)
       return
     }
+    case 'intent':
+      await seen($, env)
+      if (await isHost($)) await hostApply($, env.name, env.payload)
+      return
+    case 'state':
+      await seen($, env)
+      if (!(await isHost($))) await update($, game, current => acceptSnapshot(current, env.payload))
+      return
   }
+}
+
+async function isHost($: $) {
+  return (await read($, room))?.role === 'host'
+}
+
+/** The one place state changes: on the host, then broadcast as a snapshot. */
+async function hostApply($: $, player: string, intent: unknown) {
+  let next: ReturnType<typeof applyIntent> = null
+  await update($, game, current => (next = applyIntent(current, player, intent)) ?? current)
+  if (next) await send($, 'state', next)
+  return next !== null
+}
+
+async function poke($: $) {
+  if (!(await read($, room))) return 'Not in a room.'
+  if (await isHost($)) return (await hostApply($, myName, { kind: 'poke' })) ? 'poked' : 'rejected'
+  return (await send($, 'intent', { kind: 'poke' })) ? 'poke sent to host' : 'Send failed, see pane.'
 }
 
 async function onEnvelope($: $, id: string, env: Envelope) {
@@ -187,11 +217,13 @@ async function start($: $) {
 }
 
 /** Switches to room `code`; answers a message when nothing changed. */
-async function enter($: $, code: string, verb: string) {
+async function enter($: $, code: string, role: 'host' | 'guest') {
   const current = await read($, room)
   if (current?.code === code) return `Already in room ${code}.`
   if (current) await send($, 'bye')
-  await update($, room, () => ({ code }))
+  const verb = role === 'host' ? 'hosting' : 'joined'
+  await update($, room, () => ({ code, role }))
+  await update($, game, () => INITIAL_GAME)
   await update($, peers, () => ({}))
   await addLog($, 'you', `${verb} room ${code}`)
   await start($)
@@ -250,19 +282,21 @@ export const register: Register = (on, options) => {
         return { text: (await read($, room)) ? 'Co-op pane opened.' : HELP }
       case 'host': {
         const code = makeRoomCode(crypto.getRandomValues(new Uint8Array(8)))
-        await enter($, code, 'hosting')
+        await enter($, code, 'host')
         await $.ui.copy({ text: code })
         return { text: `Hosting room ${code} (copied). Other player: /coop join ${code}` }
       }
       case 'join': {
         const code = normalizeRoomCode(arg)
         if (!code) return { text: `Bad room code "${arg}". Expected XXXX-XXXX.` }
-        return { text: (await enter($, code, 'joined')) ?? `Joining room ${code}…` }
+        return { text: (await enter($, code, 'guest')) ?? `Joining room ${code}…` }
       }
       case 'say':
         return { text: arg ? await say($, arg) : 'Nothing to say.' }
       case 'leave':
         return { text: await leave($) }
+      case 'poke':
+        return { text: await poke($) }
       default:
         return { text: HELP }
     }
@@ -277,6 +311,7 @@ export const register: Register = (on, options) => {
     const c = await read($, conn)
     const live = livePeers(await read($, peers), Date.now())
     const lines = await read($, log)
+    const g = await read($, game)
     const rows = Math.max(3, (e.viewport?.rows ?? 24) - 8)
 
     return (
@@ -287,6 +322,12 @@ export const register: Register = (on, options) => {
         <Text dimColor>
           {live.length === 0 ? 'waiting for the other player…' : `with: ${live.map(([, p]) => p.name).join(', ')}`}
         </Text>
+        {r && (
+          <Text>
+            state #{g.seq} · {r.role ?? 'guest'}
+            {Object.entries(g.pokes).map(([who, n]) => ` · ${who} ${n}`).join('')}
+          </Text>
+        )}
         <Box flexDirection="column" marginTop={1}>
           {lines.length === 0 && <Text dimColor>{HELP}</Text>}
           {lines.slice(-rows).map(l =>

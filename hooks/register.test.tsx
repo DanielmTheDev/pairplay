@@ -72,3 +72,58 @@ test('join rejects a malformed code', async ($, on) => {
   const res = await $.command.run({ command: 'coop', args: 'join nope' })
   expect(res.text).toMatch(/Bad room code/)
 })
+
+const ntfy = (id: string, env: object) =>
+  JSON.stringify({ event: 'message', id, message: JSON.stringify({ v: 1, ...env }) }) + '\n'
+
+function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[]) {
+  const posts: { type: string; payload?: unknown }[] = []
+  on('command.register', () => ({ value: { command: 'coop' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.copy', () => ({ value: { isCopied: true } }))
+  on('session.id', () => ({ value: 'my-session' }))
+  on('env.get', () => ({ value: 'alice' }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('http.fetch', (_, e) => {
+    posts.push(JSON.parse(e.init?.body ?? '{}'))
+    return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
+  })
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout' as const, text: '{"event":"open"}\n' + lines.join('') }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  return posts
+}
+
+test('host: applies guest intent, broadcasts state; own poke too', async ($, on) => {
+  const posts = harness(on, [ntfy('m1', { from: 'peer', name: 'bob', type: 'intent', payload: { kind: 'poke' } })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'host' })
+  await new Promise(r => setTimeout(r, 50))
+  expect(posts.find(p => p.type === 'state')?.payload).toEqual({ seq: 1, pokes: { bob: 1 } })
+
+  await $.command.run({ command: 'coop', args: 'poke' })
+  expect(posts.filter(p => p.type === 'state').at(-1)?.payload).toEqual({ seq: 2, pokes: { bob: 1, alice: 1 } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /state #2/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('guest: poke sends intent only; host snapshot is what shows', async ($, on) => {
+  const posts = harness(on, [
+    ntfy('m1', { from: 'host', name: 'bob', type: 'state', payload: { seq: 4, pokes: { bob: 3, alice: 1 } } }),
+    ntfy('m2', { from: 'host', name: 'bob', type: 'state', payload: { seq: 2, pokes: { bob: 9 } } }),
+    ntfy('m3', { from: 'host', name: 'bob', type: 'intent', payload: { kind: 'poke' } }),
+  ])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await new Promise(r => setTimeout(r, 50))
+
+  await $.command.run({ command: 'coop', args: 'poke' })
+  expect(posts.find(p => p.type === 'intent')?.payload).toEqual({ kind: 'poke' })
+  expect(posts.some(p => p.type === 'state')).toBe(false)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /state #4/ })).toBeDefined()
+  await ui.unmount()
+})
