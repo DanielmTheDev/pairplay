@@ -5,9 +5,9 @@ export type Element = 'fire' | 'water' | 'nature'
 /** A basic spell, or `fire+` and the like: empowered. */
 export type Spell = Element | `${Element}+`
 
-export type Action = 'charge' | 'shield' | 'drain' | 'heal' | Spell
+export type Action = 'charge' | 'supercharge' | 'shield' | 'drain' | 'heal' | Spell
 
-/** Public: everything but the pick. `drainCooldown` counts rounds left before Drain is back. */
+/** Public: everything but the pick. The cooldowns count rounds left before that action is back. */
 export type Player = {
   name: string
   life: number
@@ -15,6 +15,8 @@ export type Player = {
   picked: boolean
   shieldLocked: boolean
   drainCooldown: number
+  superCooldown: number
+  healCooldown: number
 }
 
 /** A resolved round. At most one player is hit: `loser`, for `dmg`. */
@@ -25,8 +27,8 @@ export type RoundResult = {
   dmg: number
   /** Drain landed and took a mana. */
   stole: boolean
-  /** Who healed (not hit while healing). */
-  healed: string[]
+  /** Who healed, by how much (not hit while healing). */
+  healed: Record<string, number>
 }
 
 /** Public duel state: what the host broadcasts. Picks stay on the host until a round resolves. */

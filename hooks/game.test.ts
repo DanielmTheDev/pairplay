@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Action, Duel, Player } from '../types'
-import { acceptSnapshot, applyIntent, beats, INITIAL_DUEL, isAction, isDuel, legal, seat, summary, type HostState } from './game'
+import { acceptSnapshot, applyIntent, beats, INITIAL_DUEL, isAction, isDuel, legal, seat, summary, whyNot, type HostState } from './game'
 
 const start = (): HostState => {
   let d = seat(INITIAL_DUEL, 'h', 'dani')!
@@ -32,8 +32,8 @@ test('elements: each beats exactly one', async () => {
   expect(beats('fire', 'fire')).toBe(false)
 })
 
-test('actions: the ten picks, nothing else', async () => {
-  for (const a of ['charge', 'shield', 'drain', 'heal', 'fire', 'water', 'nature', 'fire+', 'water+', 'nature+']) {
+test('actions: the eleven picks, nothing else', async () => {
+  for (const a of ['charge', 'supercharge', 'shield', 'drain', 'heal', 'fire', 'water', 'nature', 'fire+', 'water+', 'nature+']) {
     expect(isAction(a)).toBe(true)
   }
   expect(isAction('lava')).toBe(false)
@@ -43,7 +43,7 @@ test('actions: the ten picks, nothing else', async () => {
 
 test('seat: two players with 3 life and 1 mana, a third is refused, reseat is a no-op', async () => {
   const s = start()
-  const fresh = { life: 3, mana: 1, picked: false, shieldLocked: false, drainCooldown: 0 }
+  const fresh = { life: 3, mana: 1, picked: false, shieldLocked: false, drainCooldown: 0, superCooldown: 0, healCooldown: 0 }
   expect(s.duel.players).toEqual({ h: { name: 'dani', ...fresh }, g: { name: 'caren', ...fresh } })
   expect(s.duel.seq).toBe(2)
   expect(seat(s.duel, 'x', 'eve')).toBe(null)
@@ -64,8 +64,24 @@ test('legal: mana, charge cap, shield lock, drain cooldown, heal at full life', 
   expect(legal({ ...p, shieldLocked: true }, 'shield')).toBe(false)
   expect(legal({ ...p, drainCooldown: 1 }, 'drain')).toBe(false)
   expect(legal({ ...p, mana: 2 }, 'heal')).toBe(false)
-  expect(legal({ ...p, mana: 2, life: 2 }, 'heal')).toBe(true)
-  expect(legal({ ...p, mana: 1, life: 2 }, 'heal')).toBe(false)
+  expect(legal({ ...p, mana: 1, life: 2 }, 'heal')).toBe(true)
+  expect(legal({ ...p, mana: 0, life: 2 }, 'heal')).toBe(false)
+  expect(legal({ ...p, life: 2, healCooldown: 1 }, 'heal')).toBe(false)
+})
+
+test('whyNot: says why a pick is not allowed', async () => {
+  const p = start().duel.players.h!
+  expect(whyNot(p, 'fire')).toBe(null)
+  expect(whyNot(p, 'fire+')).toBe('needs 2 mana')
+  expect(whyNot({ ...p, life: 2, mana: 0 }, 'heal')).toBe('needs 1 mana')
+  expect(whyNot({ ...p, life: 2, healCooldown: 1 }, 'heal')).toBe('heal in 1')
+  expect(whyNot({ ...p, mana: 2 }, 'heal')).toBe('life full')
+  expect(whyNot({ ...p, mana: 3 }, 'charge')).toBe('mana full')
+  expect(whyNot({ ...p, shieldLocked: true }, 'shield')).toBe('shield locked')
+  expect(whyNot({ ...p, drainCooldown: 2 }, 'drain')).toBe('drain in 2')
+  expect(whyNot({ ...p, superCooldown: 4 }, 'supercharge')).toBe('super in 4')
+  expect(whyNot({ ...p, mana: 3 }, 'supercharge')).toBe('mana full')
+  expect(whyNot({ ...p, mana: 2 }, 'supercharge')).toBe(null)
 })
 
 test('host rejects an illegal intent', async () => {
@@ -79,16 +95,23 @@ test('host rejects an illegal intent', async () => {
 const MATRIX: [Action, Action, number[], number[]][] = [
   ['charge', 'charge', [2, 3], [2, 3]],
   ['charge', 'shield', [2, 3], [2, 2]],
+  // Super charge: +2, but never past 3.
+  ['supercharge', 'charge', [2, 3], [2, 3]],
+  ['supercharge', 'shield', [2, 3], [2, 2]],
+  ['supercharge', 'fire', [1, 3], [2, 1]],
+  // Drain takes 2 from a super charger: 2 +2 (cap 3) -2.
+  ['supercharge', 'drain', [1, 1], [2, 3]],
   ['charge', 'fire', [1, 3], [2, 1]],
   ['charge', 'fire+', [0, 3], [2, 0]],
   // Gains, then loses the mana to the drainer.
   ['charge', 'drain', [1, 2], [2, 2]],
-  ['charge', 'heal', [2, 3], [3, 0]],
+  // Heal: +2, but never past 3.
+  ['charge', 'heal', [2, 3], [3, 1]],
   ['shield', 'shield', [2, 2], [2, 2]],
   ['shield', 'fire', [2, 2], [2, 1]],
   ['shield', 'water+', [2, 2], [2, 0]],
   ['shield', 'drain', [2, 2], [2, 1]],
-  ['shield', 'heal', [2, 2], [3, 0]],
+  ['shield', 'heal', [2, 2], [3, 1]],
   ['fire', 'water', [1, 1], [2, 1]],
   ['fire', 'fire', [2, 1], [2, 1]],
   ['fire', 'water+', [0, 1], [2, 0]],
@@ -101,12 +124,11 @@ const MATRIX: [Action, Action, number[], number[]][] = [
   ['fire+', 'fire+', [2, 0], [2, 0]],
   ['fire', 'drain', [2, 1], [1, 1]],
   ['fire+', 'drain', [2, 0], [0, 1]],
-  ['fire', 'heal', [2, 1], [1, 0]],
-  ['nature+', 'heal', [2, 0], [0, 0]],
+  ['fire', 'heal', [2, 1], [1, 1]],
+  ['nature+', 'heal', [2, 0], [0, 1]],
   ['drain', 'drain', [2, 1], [2, 1]],
-  // The healer paid everything: nothing left to steal.
-  ['drain', 'heal', [2, 1], [1, 0]],
-  ['heal', 'heal', [3, 0], [3, 0]],
+  ['drain', 'heal', [2, 2], [1, 0]],
+  ['heal', 'heal', [3, 1], [3, 1]],
 ]
 
 for (const [h, g, hx, gx] of MATRIX) {
@@ -123,21 +145,21 @@ for (const [h, g, hx, gx] of MATRIX) {
 
 test('result: loser, damage, theft and heals are recorded', async () => {
   const hit = round(withPlayers({ life: 2, mana: 2 }), 'fire', 'water+')
-  expect(hit.duel.last).toEqual({ round: 1, picks: { h: 'fire', g: 'water+' }, loser: 'h', dmg: 2, stole: false, healed: [] })
+  expect(hit.duel.last).toEqual({ round: 1, picks: { h: 'fire', g: 'water+' }, loser: 'h', dmg: 2, stole: false, healed: {} })
   const tie = round(withPlayers({ life: 2, mana: 2 }), 'fire', 'fire')
   expect(tie.duel.last).toMatchObject({ loser: null, dmg: 0 })
   const drain = round(withPlayers({ life: 2, mana: 2 }), 'drain', 'charge')
   expect(drain.duel.last).toMatchObject({ loser: 'g', dmg: 1, stole: true })
   const heal = round(withPlayers({ life: 2, mana: 2 }), 'shield', 'heal')
-  expect(heal.duel.last).toMatchObject({ loser: null, healed: ['g'] })
+  expect(heal.duel.last).toMatchObject({ loser: null, healed: { g: 1 } })
   const fizzle = round(withPlayers({ life: 2, mana: 2 }), 'fire', 'heal')
-  expect(fizzle.duel.last).toMatchObject({ loser: 'g', healed: [] })
+  expect(fizzle.duel.last).toMatchObject({ loser: 'g', healed: {} })
 })
 
 test('drain steals from a healer with mana left', async () => {
   const s = round(withPlayers({ life: 2, mana: 2 }, { life: 2, mana: 3 }), 'drain', 'heal')
   expect(lm(s, 'h')).toEqual([2, 2])
-  expect(lm(s, 'g')).toEqual([1, 0])
+  expect(lm(s, 'g')).toEqual([1, 1])
   expect(s.duel.last?.stole).toBe(true)
 })
 
@@ -215,7 +237,7 @@ test('life never goes below 0; death sets the winner, picks refused, rematch res
   expect(again.duel.winner).toBe(undefined)
   expect(again.duel.last).toBe(undefined)
   expect(again.duel.round).toBe(1)
-  const fresh = { life: 3, mana: 1, picked: false, shieldLocked: false, drainCooldown: 0 }
+  const fresh = { life: 3, mana: 1, picked: false, shieldLocked: false, drainCooldown: 0, superCooldown: 0, healCooldown: 0 }
   expect(again.duel.players.h).toEqual({ name: 'dani', ...fresh })
   expect(again.duel.players.g).toEqual({ name: 'caren', ...fresh })
 })
@@ -256,10 +278,49 @@ test('summary: winner, rounds, share of picks, overused and unused actions', asy
     ...start().duel,
     round: 6,
     winner: 'g',
-    last: { round: 5, picks: { h: 'charge', g: 'fire' }, loser: 'h', dmg: 1, stole: false, healed: [] },
+    last: { round: 5, picks: { h: 'charge', g: 'fire' }, loser: 'h', dmg: 1, stole: false, healed: {} },
     tally: { charge: 5, fire: 3, shield: 2 },
   }
   expect(summary(d)).toBe(
-    'caren won in 5 rounds · charge 5 (50%) ⚠, fire 3 (30%), shield 2 (20%) · never: drain, heal, water, nature, fire+, water+, nature+',
+    'caren won in 5 rounds · charge 5 (50%) ⚠, fire 3 (30%), shield 2 (20%) · never: supercharge, drain, heal, water, nature, fire+, water+, nature+',
   )
+})
+
+test('super charge: +2 mana from empty', async () => {
+  const s = round(withPlayers({ mana: 0 }), 'supercharge', 'charge')
+  expect(lm(s, 'h')).toEqual([3, 2])
+})
+
+test('super charge drained: 2 mana taken, the drainer capped at 3', async () => {
+  const s = round(withPlayers({ mana: 0 }, { mana: 3 }), 'supercharge', 'drain')
+  expect(lm(s, 'h')).toEqual([2, 0])
+  expect(lm(s, 'g')).toEqual([3, 3])
+  expect(s.duel.last).toMatchObject({ loser: 'h', stole: true })
+})
+
+test('super charge cooldown: out for five rounds, back in the sixth', async () => {
+  let s = round(withPlayers({ mana: 0 }), 'supercharge', 'charge')
+  expect(s.duel.players.h?.superCooldown).toBe(5)
+  for (let left = 4; left >= 0; left--) {
+    expect(act(s, 'h', 'supercharge')).toBe(null)
+    s = round(s, 'shield', 'shield')
+    expect(s.duel.players.h?.superCooldown).toBe(left)
+    s = { ...s, duel: { ...s.duel, players: Object.fromEntries(Object.entries(s.duel.players).map(([id, p]) => [id, { ...p, shieldLocked: false, mana: 0 }])) } }
+  }
+  expect(act(s, 'h', 'supercharge')).not.toBe(null)
+})
+
+test('heal: +2 from 1 life', async () => {
+  const s = round(withPlayers({ life: 1, mana: 1 }), 'heal', 'shield')
+  expect(lm(s, 'h')).toEqual([3, 0])
+  expect(s.duel.last?.healed).toEqual({ h: 2 })
+})
+
+test('heal cooldown: not the round after, hit or not; back the round after that', async () => {
+  let s = round(withPlayers({ life: 2, mana: 3 }), 'heal', 'fire')
+  expect(s.duel.players.h?.healCooldown).toBe(1)
+  expect(act(s, 'h', 'heal')).toBe(null)
+  s = round(s, 'charge', 'charge')
+  expect(s.duel.players.h?.healCooldown).toBe(0)
+  expect(act(s, 'h', 'heal')).not.toBe(null)
 })

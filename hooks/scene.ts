@@ -3,10 +3,10 @@
 // round in duel.last `view.t` ms into its animation. Host left, guest right, on
 // both screens; every random thing is seeded by the round, so both play alike.
 
-import type { Action, Duel, Element } from '../types'
-import { elementOf, isEmpowered, MAX_MANA } from './game'
+import type { Action, Duel, Element, Player } from '../types'
+import { COST, elementOf, isEmpowered, MAX_MANA, whyNot } from './game'
 
-export const STAGE_ROWS = 14
+export const STAGE_ROWS = 16
 export const STAGE_PX_H = STAGE_ROWS * 2
 export const FRAME_MS = 66
 export const GROUND_Y = 25
@@ -41,11 +41,18 @@ export const COLORS = {
   rune: 0xc58cff,
   mana: 0x3de0f0,
   manaEmpty: 0x26304a,
+  manaShort: 0xd04050,
+  gem: [0xc8fbff, 0x3de0f0, 0x1f7fb8],
+  gemGlow: 0x2a5a6a,
+  cooldown: 0xff3b3b,
+  card: 0x1a1530,
+  cardEdge: 0x3a3060,
+  cardGold: 0xe8b830,
   shield: 0xa8f4ff,
   shieldEdge: 0x4a9ad0,
   drain: [0xffd6ff, 0xd070ff, 0x9a30d8, 0x5a1590],
   healSpark: 0x9dffb0,
-  pickIcon: { charge: 0xffe94a, shield: 0x8ad8ff, drain: 0xb85cff, heal: 0x5cff8a },
+  pickIcon: { charge: 0xffe94a, supercharge: 0xfff7b0, shield: 0x8ad8ff, drain: 0xb85cff, heal: 0x5cff8a },
   runeGlow: 0x5a3a8a,
   orbPicked: 0xffffff,
   heart: 0xe8334a,
@@ -117,6 +124,7 @@ const RUNE = ['XXX', '..X', '.XX', '...', '.X.']
 // The viewer's own non-spell pick, over their head like an element icon.
 const PICK_ICONS: Record<Move, string[]> = {
   charge: ['..XX', '.XX.', 'XXXX', '.XX.', 'XX..'],
+  supercharge: ['.XX.XX', 'XX.XX.', 'XXXXXX', '.XX.XX', 'XX.XX.'],
   shield: ['XXXXX', 'X...X', 'X...X', '.X.X.', '..X..'],
   drain: ['X...X', 'XX.XX', '.XXX.', '..X..'],
   heal: ['..X..', '..X..', 'XXXXX', '..X..', '..X..'],
@@ -130,6 +138,9 @@ const GLYPHS: Record<string, string[]> = {
   '1': ['.X.', 'XX.', '.X.', '.X.', 'XXX'],
   '2': ['XXX', '..X', 'XXX', 'X..', 'XXX'],
   '+': ['...', '.X.', 'XXX', '.X.', '...'],
+  '3': ['XXX', '..X', '.XX', '..X', 'XXX'],
+  '4': ['X.X', 'X.X', 'XXX', '..X', '..X'],
+  '5': ['XXX', 'X..', 'XXX', '..X', 'XXX'],
 }
 
 export type StageView = {
@@ -159,7 +170,7 @@ export function roundMs(duel: Duel) {
 type Canvas = { w: number; px: Uint32Array; ox: number; oy: number }
 type Pt = { x: number; y: number }
 type Side = 'host' | 'guest'
-type Move = 'charge' | 'shield' | 'drain' | 'heal'
+type Move = 'charge' | 'supercharge' | 'shield' | 'drain' | 'heal'
 /** What flies across the stage: an element, a drain, or nothing. */
 type Shot = Element | 'drain'
 
@@ -175,7 +186,7 @@ function palette(shot: Shot): readonly number[] {
 function orbColor(a: Action) {
   const shot = shotOf(a)
   if (shot) return palette(shot)[1]!
-  return a === 'charge' ? COLORS.mana : a === 'shield' ? COLORS.shield : COLORS.healSpark
+  return a === 'charge' || a === 'supercharge' ? COLORS.mana : a === 'shield' ? COLORS.shield : COLORS.healSpark
 }
 
 function put(c: Canvas, x: number, y: number, color: number) {
@@ -273,7 +284,7 @@ function backdrop(c: Canvas, now: number, flash: number) {
   for (let x = 0; x < w; x++) {
     c.px[GROUND_Y * w + x] = rnd(x, 4) > 0.5 ? COLORS.grass[0]! : COLORS.grass[1]!
     c.px[(GROUND_Y + 1) * w + x] = COLORS.dirt[0]!
-    c.px[(GROUND_Y + 2) * w + x] = rnd(x, 5) > 0.7 ? COLORS.dirt[0]! : COLORS.dirt[1]!
+    for (let y = GROUND_Y + 2; y < STAGE_PX_H; y++) c.px[y * w + x] = rnd(x, y, 5) > 0.7 ? COLORS.dirt[0]! : COLORS.dirt[1]!
     if (rnd(x, 6) > 0.75) c.px[(GROUND_Y - 1) * w + x] = COLORS.grass[1]!
   }
 }
@@ -391,11 +402,26 @@ function pickIcon(c: Canvas, a: Action, x0: number, y0: number) {
   glyphs(c, PICK_ICONS[a as Move], x0, y0, COLORS.pickIcon[a as Move])
 }
 
-/** Mana crystals set in the ground below a wizard, lit for each mana held. */
-function crystals(c: Canvas, cx: number, mana: number) {
+const GEM = ['.a.', 'abc', 'abc', 'bbc', '.c.']
+
+/** Mana gems set in the ground below a wizard: lit, glowing and twinkling for each mana held. */
+function crystals(c: Canvas, cx: number, mana: number, now: number, seed: number) {
   for (let i = 0; i < MAX_MANA; i++) {
-    const color = i < mana ? COLORS.mana : COLORS.manaEmpty
-    for (let y = 0; y < 2; y++) for (let x = 0; x < 2; x++) put(c, cx - 6 + i * 4 + x, GROUND_Y + 1 + y, color)
+    const x0 = Math.round(cx - 6 + i * 4)
+    const y0 = GROUND_Y + 1
+    const lit = i < mana
+    if (lit && Math.sin(now / 500 + i * 2.1) > -0.2) {
+      for (const [dx, dy] of [[-1, 1], [3, 1], [-1, 3], [3, 3], [1, 5]] as const) put(c, x0 + dx, y0 + dy, COLORS.gemGlow)
+    }
+    GEM.forEach((row, y) =>
+      [...row].forEach((ch, x) => {
+        if (ch === '.') return
+        const color = !lit ? COLORS.manaEmpty : COLORS.gem[ch === 'a' ? 0 : ch === 'b' ? 1 : 2]!
+        put(c, x0 + x, y0 + y, color)
+      }),
+    )
+    // A glint runs over a lit gem now and then.
+    if (lit && rnd(seed, i, Math.floor(now / 250)) > 0.75) put(c, x0 + 1, y0, 0xffffff)
   }
 }
 
@@ -412,9 +438,9 @@ function shieldWall(c: Canvas, x: number, dir: number, k: number, t: number) {
   }
 }
 
-/** Mana motes spiralling in on a charging wizard. */
-function manaSparks(c: Canvas, at: Pt, k: number, t: number) {
-  for (let i = 0; i < 10; i++) {
+/** Mana motes spiralling in on a charging wizard; a super charge pulls in twice as many. */
+function manaSparks(c: Canvas, at: Pt, k: number, t: number, n = 10) {
+  for (let i = 0; i < n; i++) {
     const ang = i * 0.63 + t * 0.01
     const r = lerp(10, 2, (k + (i % 3) * 0.15) % 1)
     put(c, at.x + Math.cos(ang) * r, at.y + Math.sin(ang) * r * 0.7, COLORS.mana)
@@ -680,13 +706,14 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
   const shot = (side: Side) => shotOf(action(side))
   const shooters = playing && id.host && id.guest ? (['host', 'guest'] as const).filter(side => shot(side)) : []
   const clash = shooters.length === 2
-  const healed = (side: Side) => playing && !!id[side] && last.healed.includes(id[side]!)
+  /** How much `side` healed this round; 0 when not healing, or hit. */
+  const healed = (side: Side) => (playing && id[side] ? (last.healed[id[side]!] ?? 0) : 0)
   /** Life as the round shows it at `t`: a hit lands at PUSH_END, a heal at CLASH_END. */
   const shownLife = (side: Side) => {
     const life = duel.players[id[side]!]!.life
     if (!playing) return life
     if (side === loser && t < PUSH_END) return life + last.dmg
-    if (healed(side) && t < CLASH_END) return life - 1
+    if (healed(side) && t < CLASH_END) return life - healed(side)
     return life
   }
   const winnerSide = sideOf(duel.winner)
@@ -699,7 +726,9 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
   const flash = playing && clash && t >= TRAVEL_END && t < TRAVEL_END + 100 ? 0.45 : 0
   backdrop(c, view.now, flash)
   if (!playing && !deadSide) fireflies(c, view.now)
-  for (const side of ['host', 'guest'] as const) if (id[side]) crystals(c, body(side).x, duel.players[id[side]!]!.mana)
+  for (const side of ['host', 'guest'] as const) {
+    if (id[side]) crystals(c, body(side).x, duel.players[id[side]!]!.mana, view.now, side === 'host' ? 1 : 2)
+  }
 
   const shaking = playing && ((clash && t >= TRAVEL_END && t < CLASH_END) || (loser && t >= PUSH_END && t < PUSH_END + 260))
   const shake = () => {
@@ -787,12 +816,13 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
     for (const side of ['host', 'guest'] as const) {
       const a = action(side)
       if (a === 'charge' && t < CLASH_END) manaSparks(c, body(side), phase(t, 0, CLASH_END), t)
+      if (a === 'supercharge' && t < CLASH_END) manaSparks(c, body(side), phase(t, 0, CLASH_END), t, 24)
       if (a === 'shield' && t >= CHARGE_END / 2) shieldWall(c, wallX(side), dirOf(side), phase(t, CHARGE_END / 2, CHARGE_END * 2), t)
       if (healed(side) && t >= CHARGE_END && t < TIE_END) {
         healSparks(c, body(side), phase(t, CHARGE_END, TIE_END), seed + (side === 'host' ? 5 : 6))
         if (t >= CLASH_END) {
           still()
-          text(c, '+1', body(side).x - 3, SPRITE_TOP - 2 - phase(t, CLASH_END, TIE_END) * 6, COLORS.healSpark, null)
+          text(c, `+${healed(side)}`, body(side).x - 3, SPRITE_TOP - 2 - phase(t, CLASH_END, TIE_END) * 6, COLORS.healSpark, null)
           shake()
         }
       }
@@ -878,6 +908,157 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
     text(c, 'KO!', Math.floor((width - textWidth('KO!', 2)) / 2), 3 + bounce, COLORS.ko, COLORS.koEdge, 2)
   }
   return c.px
+}
+
+// ─── action cards ────────────────────────────────────────────────────────────
+
+/** One card per action, CARD_COLS wide (the last column a gap), CARD_ROWS tall. */
+export const CARD_COLS = 10
+export const CARD_ROWS = 5
+export const CARD_PX_H = CARD_ROWS * 2
+const CARD_W = CARD_COLS - 1
+
+/**
+ * The pane's action cards: a little animated drawing each, cost as mana pips.
+ * What `p` may not pick is grey, with the rounds left in red when on cooldown.
+ */
+export function drawCards(actions: Action[], p: Player | undefined, now: number): Uint32Array {
+  const w = actions.length * CARD_COLS
+  const px = new Uint32Array(w * CARD_PX_H)
+  actions.forEach((a, i) => {
+    const c: Canvas = { w, px, ox: i * CARD_COLS, oy: 0 }
+    const why = p ? whyNot(p, a) : 'not seated'
+    for (let y = 0; y < CARD_PX_H; y++) {
+      for (let x = 0; x < CARD_W; x++) {
+        const corner = (x === 0 || x === CARD_W - 1) && (y === 0 || y === CARD_PX_H - 1)
+        if (!corner) put(c, x, y, x === 0 || y === 0 || x === CARD_W - 1 || y === CARD_PX_H - 1 ? (isEmpowered(a) ? COLORS.cardGold : COLORS.cardEdge) : COLORS.card)
+      }
+    }
+    art(c, a, now + i * 137)
+    const short = !!why?.startsWith('needs')
+    for (let k = 0; k < COST[a]; k++) for (let y = 7; y <= 8; y++) put(c, 2 + k * 2, y, short ? COLORS.manaShort : COLORS.mana)
+    if (why) {
+      for (let y = 0; y < CARD_PX_H; y++) {
+        for (let x = 0; x < CARD_W; x++) {
+          const at = y * w + i * CARD_COLS + x
+          const col = px[at]!
+          if (col && col !== COLORS.manaShort) px[at] = grey(col)
+        }
+      }
+      const left = cooldownOf(p, a)
+      if (left > 0) glyphs(c, GLYPHS[String(left)]!, 3, 2, COLORS.cooldown)
+    }
+  })
+  return px
+}
+
+function grey(col: number) {
+  const l = Math.round((((col >> 16) & 255) * 0.3 + ((col >> 8) & 255) * 0.59 + (col & 255) * 0.11) * 0.55) || 1
+  return (l << 16) | (l << 8) | l
+}
+
+/** Rounds until `a` is back; 0 when no cooldown holds it. */
+function cooldownOf(p: Player | undefined, a: Action) {
+  if (!p) return 0
+  if (a === 'shield') return p.shieldLocked ? 1 : 0
+  if (a === 'drain') return p.drainCooldown
+  if (a === 'supercharge') return p.superCooldown
+  if (a === 'heal') return p.healCooldown
+  return 0
+}
+
+/** An empowered card's ring of motes, circling its drawing. */
+function aura(c: Canvas, pal: readonly number[], now: number) {
+  for (let i = 0; i < 8; i++) {
+    const ang = now / 260 + (i / 8) * Math.PI * 2
+    put(c, 4 + Math.cos(ang) * 3.4, 3.8 + Math.sin(ang) * 2.9, i % 2 ? pal[0]! : pal[1]!)
+  }
+}
+
+/** The drawing on a card, inside x 1..7, y 1..6; animated by `now`. */
+function art(c: Canvas, a: Action, now: number) {
+  const el = elementOf(a)
+  const big = isEmpowered(a)
+  const cx = 4
+  if (el === 'fire') {
+    const pal = COLORS.spell.fire
+    if (big) aura(c, pal, now)
+    const width = [0.5, 0.8, 1.3, 1.7, 2.1, 2.2]
+    for (let y = 1; y <= 6; y++) {
+      const sway = Math.round(Math.sin(now / 110 + y * 0.9) * (6 - y) * 0.18)
+      const half = width[y - 1]! * (big ? 1.25 : 1) + (rnd(y, Math.floor(now / 90)) > 0.6 ? 0.5 : 0)
+      for (let x = Math.floor(cx - half); x <= Math.ceil(cx + half); x++) {
+        const d = Math.abs(x - cx) / Math.max(half, 0.5)
+        put(c, x + sway, y, pick(pal, 1 - (y / 6) * 0.8 + d * 0.4))
+      }
+    }
+    if (rnd(7, Math.floor(now / 120)) > 0.5) put(c, cx + 1, 0.5, pal[1]!)
+  } else if (el === 'water') {
+    const pal = COLORS.spell.water
+    const fall = (now / 700) % 1
+    const rows = ['...a...', '..aab..', '.aaabb.', '.aaaab.', '..aaa..']
+    if (big) aura(c, pal, now)
+    rows.forEach((row, y) =>
+      [...row].forEach((ch, x) => ch !== '.' && put(c, x + 1, y + 1, ch === 'b' ? pal[1]! : pal[2 + ((x + y + Math.floor(now / 200)) % 2)]!)),
+    )
+    put(c, 3, 3, pal[0]!)
+    // A ripple spreads under the drop.
+    const r = Math.floor(fall * 4)
+    put(c, cx - r, 6, pal[1]!)
+    put(c, cx + r, 6, pal[1]!)
+  } else if (el === 'nature') {
+    const pal = COLORS.spell.nature
+    if (big) aura(c, pal, now)
+    const sway = Math.sin(now / 300)
+    for (let y = 2; y <= 6; y++) put(c, cx + (y < 4 ? Math.round(sway * 0.6) : 0), y, pal[3]!)
+    const lx = cx - 2 + Math.round(sway * 0.5)
+    put(c, lx, 3, pal[1]!)
+    put(c, lx + 1, 3, pal[2]!)
+    put(c, lx - 1, 2, pal[1]!)
+    const rx = cx + 2 + Math.round(sway * 0.5)
+    put(c, rx, 4, pal[1]!)
+    put(c, rx - 1, 4, pal[2]!)
+    put(c, rx + 1, 3, pal[1]!)
+    put(c, cx + Math.round(sway), 1, Math.sin(now / 400) > 0 ? COLORS.petal : pal[0]!)
+  } else if (a === 'charge' || a === 'supercharge') {
+    const on = Math.sin(now / 150) > -0.4
+    const bolt = (x0: number) =>
+      ['..X', '.X.', 'XXX', '.X.', 'X..', 'X..'].forEach((row, y) =>
+        [...row].forEach((ch, x) => ch === 'X' && put(c, x0 + x, y + 1, on ? COLORS.pickIcon.charge : COLORS.spark[0]!)),
+      )
+    if (a === 'supercharge') {
+      blob(c, cx, 3.5, 3 + Math.sin(now / 200) * 0.6, () => COLORS.gemGlow)
+      bolt(1)
+      bolt(5)
+    } else bolt(3)
+    const ang = now / 160
+    put(c, cx + Math.cos(ang) * 3, 3.5 + Math.sin(ang) * 2.5, COLORS.gem[0]!)
+  } else if (a === 'shield') {
+    const rows = ['XXXXXXX', 'XXXXXXX', 'XXXXXXX', '.XXXXX.', '..XXX..', '...X...']
+    const shine = Math.floor(now / 120) % 14
+    rows.forEach((row, y) =>
+      [...row].forEach((ch, x) => {
+        if (ch !== 'X') return
+        const edge = x === 0 || x === 6 || y === 0 || row[x - 1] !== 'X' || row[x + 1] !== 'X'
+        put(c, x + 1, y + 1, x + y === shine ? 0xffffff : edge ? COLORS.shieldEdge : COLORS.shield)
+      }),
+    )
+  } else if (a === 'drain') {
+    blob(c, cx, 3.5, 1.2, () => COLORS.drain[1]!)
+    for (let i = 0; i < 6; i++) {
+      const ang = now / 180 + i * 1.05
+      const r = 1.5 + ((i % 3) * 0.6 + now / 500) % 1.8
+      put(c, cx + Math.cos(ang) * r, 3.5 + Math.sin(ang) * r * 0.9, COLORS.drain[i % 2 ? 0 : 2]!)
+    }
+  } else if (a === 'heal') {
+    const beat = Math.sin(now / 180) > 0.3
+    const s = beat ? 3 : 2
+    for (let k = -s; k <= s; k++) {
+      put(c, cx + k, 3.5, COLORS.pickIcon.heal)
+      put(c, cx, 3.5 + k, COLORS.pickIcon.heal)
+    }
+    put(c, cx, 3.5, COLORS.healSpark)
+  }
 }
 
 /** Topples with gravity, a small bounce at the bottom. */

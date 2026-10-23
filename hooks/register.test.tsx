@@ -84,6 +84,8 @@ const P = (name: string, over: object = {}) => ({
   picked: false,
   shieldLocked: false,
   drainCooldown: 0,
+  superCooldown: 0,
+  healCooldown: 0,
   ...over,
 })
 
@@ -149,12 +151,12 @@ test('host: seats guest, hides first pick, resolves on second', async ($, on) =>
   expect(await ui.find({ type: 'Raster', key: 'stage' })).toBeDefined()
   const res = await $.command.run({ command: 'coop', args: 'cast water' })
   expect(res.text).toMatch(/round resolves/)
-  expect(blits.at(-1)).toMatchObject({ requestId: 'pairplay', key: 'stage' })
+  expect(blits).toContainEqual(expect.objectContaining({ requestId: 'pairplay', key: 'stage' }))
   // The result stays hidden while the round plays.
   expect(await ui.find({ type: 'Text', text: /→/ })).toBeUndefined()
   const after = state(posts)!
   expect(after.players.peer.life).toBe(2)
-  expect(after.last).toEqual({ round: 1, picks: { peer: 'fire', 'my-session': 'water' }, loser: 'peer', dmg: 1, stole: false, healed: [] })
+  expect(after.last).toEqual({ round: 1, picks: { peer: 'fire', 'my-session': 'water' }, loser: 'peer', dmg: 1, stole: false, healed: {} })
 
   await clock.advance(3000)
   await ui.unmount()
@@ -184,7 +186,7 @@ test('guest: cast sends intent only; host snapshot is what shows', async ($, on)
 
   expect((await $.command.run({ command: 'coop', args: 'cast lava' })).text).toMatch(/charge, shield/)
   // Not enough mana: refused before it goes out.
-  expect((await $.command.run({ command: 'coop', args: 'cast nature+' })).text).toMatch(/not allowed/)
+  expect((await $.command.run({ command: 'coop', args: 'cast nature+' })).text).toMatch(/needs 2 mana/)
   await $.command.run({ command: 'coop', args: 'cast nature' })
   expect(posts.find(p => p.type === 'intent')?.payload).toEqual({ kind: 'act', action: 'nature' })
   expect(posts.some(p => p.type === 'state')).toBe(false)
@@ -221,7 +223,6 @@ test('guest: own pick shows as its icon on the stage', async ($, on) => {
   const words = [...new Uint32Array(bytes.buffer)]
   expect(words.includes(COLORS.icon.nature)).toBe(true)
   expect(words.includes(COLORS.icon.fire)).toBe(false)
-  expect(await ui.find({ type: 'Button', key: 'nature' })).toMatchObject({ props: { label: '🌿' } })
   await ui.unmount()
 })
 
@@ -231,7 +232,7 @@ test('guest: pane shows mana and timers, greys out what is not allowed', async (
     round: 4,
     players: {
       host: P('dani', { mana: 3 }),
-      'my-session': P('alice', { life: 2, mana: 1, shieldLocked: true, drainCooldown: 2 }),
+      'my-session': P('alice', { life: 2, mana: 1, shieldLocked: true, drainCooldown: 2, superCooldown: 3, healCooldown: 1 }),
     },
   }
   const posts = harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
@@ -240,17 +241,45 @@ test('guest: pane shows mana and timers, greys out what is not allowed', async (
   await settle()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /alice.*◆◇◇.*shield locked.*drain in 2/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /alice.*◆◇◇.*shield locked.*drain in 2.*super in 3.*heal in 1/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /dani.*◆◆◆/ })).toBeDefined()
-  const dim = async (key: string) => (await ui.find({ type: 'Button', key }))?.props.dimColor === true
-  expect(await dim('charge')).toBe(false)
-  expect(await dim('fire')).toBe(false)
-  expect(await dim('shield')).toBe(true)
-  expect(await dim('drain')).toBe(true)
-  expect(await dim('fire+')).toBe(true)
-  expect(await dim('heal')).toBe(true)
-  await ui.press({ key: 'shield' })
+  // Action cards above the buttons, animated by the stage loop.
+  expect(await ui.find({ type: 'Raster', key: 'cards-0' })).toMatchObject({ props: { columns: 50, rows: 5 } })
+  expect(await ui.find({ type: 'Raster', key: 'cards-1' })).toMatchObject({ props: { columns: 60, rows: 5 } })
+  expect(await ui.find({ type: 'Button', key: 'fire' })).toMatchObject({ props: { label: 'fire', hotkey: '1', plain: true } })
+  // Only what is allowed is pressable; the rest is drawn, not a Button.
+  const button = (key: string) => ui.find({ type: 'Button', key })
+  expect(await button('charge')).toBeDefined()
+  expect(await button('fire')).toBeDefined()
+  for (const key of ['shield', 'drain', 'supercharge', 'fire+', 'water+', 'nature+', 'heal']) expect(await button(key)).toBeUndefined()
+  expect((await $.command.run({ command: 'coop', args: 'shield' })).text).toMatch(/shield locked/)
+  expect((await $.command.run({ command: 'coop', args: 'fire+' })).text).toMatch(/needs 2 mana/)
+  expect((await $.command.run({ command: 'coop', args: 'supercharge' })).text).toMatch(/super in 3/)
   expect(posts.some(p => p.type === 'intent')).toBe(false)
+  await ui.unmount()
+})
+
+test('guest: super charge is offered while off cooldown', async ($, on) => {
+  const duel = { seq: 5, round: 1, players: { host: P('dani'), 'my-session': P('alice') } }
+  const posts = harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'supercharge' })
+  expect(posts.filter(p => p.type === 'intent').at(-1)?.payload).toEqual({ kind: 'act', action: 'supercharge' })
+  await ui.unmount()
+})
+
+test('host: an empowered spell at 1 mana is not offered and not picked', async ($, on) => {
+  const posts = harness(on, [ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'host' })
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'fire+' })).toBeUndefined()
+  expect((await $.command.run({ command: 'coop', args: 'cast fire+' })).text).toMatch(/needs 2 mana/)
+  expect(state(posts)!.players['my-session'].picked).toBe(false)
   await ui.unmount()
 })
 
@@ -261,7 +290,7 @@ test('guest: game over logs the game summary', async ($, on) => {
     seq: 6,
     round: 4,
     players: { host: P('dani', { mana: 0 }), 'my-session': P('alice', { life: 0 }) },
-    last: { round: 3, picks: { host: 'fire', 'my-session': 'charge' }, loser: 'my-session', dmg: 1, stole: false, healed: [] },
+    last: { round: 3, picks: { host: 'fire', 'my-session': 'charge' }, loser: 'my-session', dmg: 1, stole: false, healed: {} },
     winner: 'host',
     tally: { fire: 3, charge: 3 },
   }

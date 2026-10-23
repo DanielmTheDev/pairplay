@@ -15,11 +15,12 @@ Design goal: **no dominant strategy**. Every action is beaten by some other acti
 | Action | Cost | Effect | Restriction |
 |---|---|---|---|
 | Charge | 0 | +1 mana | Illegal at 3 mana |
+| Super charge | 0 | +2 mana (capped at 3) | Illegal at 3 mana. 5-round cooldown |
 | Shield | 0 | Blocks all damage and mana theft this round | Illegal if you shielded last round |
 | Fire / Water / Nature (basic) | 1 | 1 damage to the opponent if it lands | — |
 | Empowered Fire / Water / Nature | 2 | 2 damage if it lands. Wins a same-element clash against a basic spell, for 1 damage | — |
-| Drain | 1 | No element. If it lands: 1 damage, and 1 mana moves from the opponent to you | 2-round cooldown |
-| Heal | 2 | +1 life (max 3). Fizzles if you are hit this round | Illegal at 3 life |
+| Drain | 1 | No element. If it lands: 1 damage, and 1 mana moves from the opponent to you (2 from a super charger; the drainer is capped at 3) | 2-round cooldown |
+| Heal | 1 | +2 life (max 3). Fizzles if you are hit this round | Illegal at 3 life. 1-round cooldown |
 
 Costs are paid when the round resolves, whatever the outcome (blocked, tied or fizzled).
 
@@ -34,10 +35,11 @@ Costs are paid when the round resolves, whatever the outcome (blocked, tied or f
 | Charge | Basic | A takes 1 and still gains +1 mana |
 | Charge | Empowered | A takes 2 and still gains +1 mana |
 | Charge | Drain | A gains +1 mana, then takes 1 damage and loses 1 mana to B (net: A −1 life, mana unchanged) |
-| Charge | Heal | A +1 mana, B +1 life |
+| Charge | Heal | A +1 mana, B +2 life (max 3) |
+| Super charge | Drain | A gains +2 (cap 3), then takes 1 and loses 2 mana to B |
 | Shield | Shield | Nothing. Both are shield-locked next round |
 | Shield | any spell | Blocked. B still pays the cost, and Drain still starts its cooldown |
-| Shield | Heal | B +1 life |
+| Shield | Heal | B +2 life (max 3) |
 | Basic | Basic | Winning element deals 1. Same element: tie, no damage |
 | Basic | Empowered | Different elements: the winner deals its own damage (basic 1, empowered 2). Same element: the empowered spell wins and deals 1 |
 | Empowered | Empowered | Winning element deals 2. Same element: tie, no damage |
@@ -45,7 +47,7 @@ Costs are paid when the round resolves, whatever the outcome (blocked, tied or f
 | Basic / Empowered | Heal | B takes 1 or 2. The heal fizzles |
 | Drain | Drain | Tie, no damage. Both go on cooldown |
 | Drain | Heal | B takes 1 and loses 1 mana to A. The heal fizzles |
-| Heal | Heal | Both +1 life |
+| Heal | Heal | Both +2 life (max 3) |
 
 Property: **at most one player takes damage per round**, so a round can never end with both players dead (no draws).
 
@@ -64,6 +66,8 @@ The mana cap can't be exceeded: charging at 3 is illegal, and a drainer has at m
 
 - **Shield lock**: if you shield in round *n*, you can't shield in round *n+1*.
 - **Drain cooldown**: if you cast Drain in round *n*, you can't cast it in rounds *n+1* and *n+2*. It's available again in *n+3*. The cooldown starts whether the Drain landed, was blocked or tied.
+- **Super charge cooldown**: used in round *n*, back in *n+6*.
+- **Heal cooldown**: used in round *n* (landed or fizzled), back in *n+2*.
 
 ## Legality and visibility
 

@@ -1,9 +1,22 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Action, Conn, Duel, Element, LogLine, Peer, Player } from '../types'
-import { ACTIONS, ELEMENTS, INITIAL_DUEL, MAX_MANA, acceptSnapshot, applyIntent, isAction, legal, seat, summary } from './game'
-import { FRAME_MS, STAGE_PX_H, STAGE_ROWS, drawStage, encodeCells, roundMs, stageColumns, type StageView } from './scene'
+import type { Action, Conn, Duel, LogLine, Peer, Player } from '../types'
+import { ACTIONS, ELEMENTS, INITIAL_DUEL, MAX_MANA, acceptSnapshot, applyIntent, isAction, legal, seat, summary, whyNot } from './game'
+import {
+  CARD_COLS,
+  CARD_PX_H,
+  CARD_ROWS,
+  FRAME_MS,
+  STAGE_PX_H,
+  STAGE_ROWS,
+  drawCards,
+  drawStage,
+  encodeCells,
+  roundMs,
+  stageColumns,
+  type StageView,
+} from './scene'
 import {
   PING_MS,
   PROTOCOL,
@@ -20,18 +33,24 @@ import {
 } from './protocol'
 
 const PANE = 'pairplay'
-const ICON: Record<Element, string> = { fire: '🔥', water: '💧', nature: '🌿' }
-// The pane's buttons: a row of moves, a row of spells, each with its hotkey.
+// The pane's buttons, under their cards: a row of moves, a row of spells, each with its hotkey.
 const MOVES: { action: Action; label: string; hotkey: string }[] = [
   { action: 'charge', label: 'charge', hotkey: 'c' },
+  { action: 'supercharge', label: 'super', hotkey: 'u' },
   { action: 'shield', label: 'shield', hotkey: 's' },
   { action: 'drain', label: 'drain', hotkey: 'd' },
   { action: 'heal', label: 'heal', hotkey: 'h' },
 ]
 const SPELLS: { action: Action; label: string; hotkey: string }[] = [
-  ...ELEMENTS.map((el, i) => ({ action: el, label: ICON[el], hotkey: String(i + 1) })),
-  ...ELEMENTS.map((el, i) => ({ action: `${el}+` as const, label: `${ICON[el]}+`, hotkey: String(i + 4) })),
+  ...ELEMENTS.map((el, i) => ({ action: el, label: el, hotkey: String(i + 1) })),
+  ...ELEMENTS.map((el, i) => ({ action: `${el}+` as const, label: `${el}+`, hotkey: String(i + 4) })),
 ]
+const ROWS = [MOVES, SPELLS]
+
+function cardCells(row: typeof MOVES, p: Player | undefined, now: number) {
+  const cols = row.length * CARD_COLS
+  return encodeCells(drawCards(row.map(b => b.action), p, now), cols, CARD_PX_H)
+}
 
 const room = atom({ plugin: 'pairplay', key: 'room' } as const, null, { shape: 'room-1' })
 const peers = atom({ plugin: 'pairplay', key: 'peers' } as const, {}, { shape: 'peers-1' })
@@ -47,7 +66,7 @@ const HELP = [
   '/coop host          create a room, share the code',
   '/coop join <code>   join the other player',
   '/coop say <text>    chat (or type in the pane)',
-  '/coop <action>      charge | shield | drain (1 mana) | heal (2)',
+  '/coop <action>      charge | supercharge | shield | drain (1 mana) | heal (1)',
   '                    fire | water | nature (1), fire+ ... (2)',
   '/coop rematch       new duel after one is won',
   '/coop leave         leave the room',
@@ -282,13 +301,18 @@ async function tick($: $) {
   }
   // Denied while the pane is closed: nothing to paint, the loop just idles.
   await $.ui.blit({ requestId: PANE, key: 'stage', cells: encodeCells(drawStage(d, stageCols, view), stageCols, STAGE_PX_H) })
+  if (d.winner === undefined) {
+    const p = d.players[me]
+    await Promise.all(ROWS.map((row, i) => $.ui.blit({ requestId: PANE, key: `cards-${i}`, cells: cardCells(row, p, view.now) })))
+  }
 }
 
 async function act($: $, intent: { kind: 'act'; action: Action } | { kind: 'rematch' }) {
   if (!(await read($, room))) return 'Not in a room.'
   if (intent.kind === 'act') {
     const p = (await read($, game)).players[me]
-    if (!p || !legal(p, intent.action)) return `${describe(intent)}: not allowed now`
+    const why = p ? whyNot(p, intent.action) : 'not seated'
+    if (why) return `${describe(intent)}: ${why}`
   }
   if (!(await isHost($))) {
     if (intent.kind === 'act') {
@@ -346,18 +370,24 @@ function roundText(d: Duel) {
   const vs = Object.entries(p).map(([id, a]) => `${nameOf(d, id)} ${a}`).join(' vs ')
   const what = [
     ...(loser ? [`${nameOf(d, loser)} -${dmg}${stole ? ', 1 mana stolen' : ''}`] : []),
-    ...healed.map(id => `${nameOf(d, id)} +1`),
+    ...Object.entries(healed).map(([id, n]) => `${nameOf(d, id)} +${n}`),
   ]
   return `round ${round}: ${vs} → ${what.length ? what.join(', ') : 'no damage'}`
 }
 
-/** Mana as filled and empty pips, then the timers that lock a move. */
-function playerState(p: Player) {
+/** The timers that lock a move, each after a separator. */
+function timers(p: Player) {
   const timers = [
     ...(p.shieldLocked ? ['shield locked'] : []),
     ...(p.drainCooldown > 0 ? [`drain in ${p.drainCooldown}`] : []),
+    ...(p.superCooldown > 0 ? [`super in ${p.superCooldown}`] : []),
+    ...(p.healCooldown > 0 ? [`heal in ${p.healCooldown}`] : []),
   ]
-  return ['◆'.repeat(Math.max(0, p.mana)) + '◇'.repeat(Math.max(0, MAX_MANA - p.mana)), ...timers].join(' · ')
+  return timers.map(x => ` · ${x}`).join('')
+}
+
+function mana(p: Player) {
+  return '◆'.repeat(Math.max(0, p.mana)) + '◇'.repeat(Math.max(0, MAX_MANA - p.mana))
 }
 
 async function onEnvelope($: $, id: string, env: Envelope) {
@@ -575,12 +605,13 @@ export const register: Register = (on, options) => {
                 <Text>
                   <Text color={color(id)} bold>{id === me ? `${p.name} (you)` : p.name}</Text>{' '}
                   <Text dimColor>{playing || g.winner ? '' : p.picked ? '✦ ' : '… '}</Text>
-                  {playerState(p)}
+                  <Text color="#3de0f0" bold>{mana(p)}</Text>
+                  <Text color="#ff6b6b">{timers(p)}</Text>
                 </Text>
               ) : (
                 <Text>
                   {id === me ? 'you' : p.name}: {'♥'.repeat(Math.max(0, p.life))}
-                  {'♡'.repeat(Math.max(0, 3 - p.life))} {playerState(p)}{' '}
+                  {'♡'.repeat(Math.max(0, 3 - p.life))} {mana(p)}{timers(p)}{' '}
                   <Text dimColor>{p.picked ? 'picked' : g.winner ? '' : 'thinking…'}</Text>
                 </Text>
               ),
@@ -589,20 +620,37 @@ export const register: Register = (on, options) => {
             {g.winner ? (
               <Button key="rematch" label="⚔ rematch" hotkey="r" onPress={() => void act($, { kind: 'rematch' })} />
             ) : (
-              [MOVES, SPELLS].map(row => (
-                <Box flexDirection="row" gap={1}>
-                  {row.map(b => {
-                    const p = g.players[me]
-                    return (
-                      <Button
-                        key={b.action}
-                        label={b.label}
-                        hotkey={b.hotkey}
-                        dimColor={!p || !legal(p, b.action)}
-                        onPress={() => void act($, { kind: 'act', action: b.action })}
-                      />
-                    )
-                  })}
+              ROWS.map((row, i) => (
+                <Box flexDirection="column">
+                  {Raster && (
+                    <Raster
+                      key={`cards-${i}`}
+                      columns={row.length * CARD_COLS}
+                      rows={CARD_ROWS}
+                      cells={cardCells(row, g.players[me], view.now)}
+                    />
+                  )}
+                  <Box flexDirection="row">
+                    {row.map(b => {
+                      const p = g.players[me]
+                      return (
+                        <Box width={CARD_COLS}>
+                          {p && legal(p, b.action) ? (
+                            <Button
+                              key={b.action}
+                              label={b.label}
+                              hotkey={b.hotkey}
+                              plain
+                              onPress={() => void act($, { kind: 'act', action: b.action })}
+                            />
+                          ) : (
+                            // Not allowed: drawn, but nothing to press.
+                            <Text dimColor>{`${b.hotkey}: ${b.label}`}</Text>
+                          )}
+                        </Box>
+                      )
+                    })}
+                  </Box>
                 </Box>
               ))
             )}

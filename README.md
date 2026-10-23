@@ -37,17 +37,19 @@ pick one action in secret (changeable until the other has picked):
 | Action | Cost | Effect | Key |
 | --- | --- | --- | --- |
 | charge | 0 | +1 mana (not at 3) | c |
+| supercharge | 0 | +2 mana (capped at 3); out for 5 rounds after | u |
 | shield | 0 | blocks all damage and theft; not two rounds in a row | s |
 | fire / water / nature | 1 | 1 damage; water > fire > nature > water | 1-3 |
 | fire+ / water+ / nature+ | 2 | 2 damage; beats a same-element basic for 1 | 4-6 |
-| drain | 1 | 1 damage + steals 1 mana; loses to any element; 2-round cooldown | d |
-| heal | 2 | +1 life, fizzles if hit | h |
+| drain | 1 | 1 damage + steals 1 mana (2 from a super charger); loses to any element; 2-round cooldown | d |
+| heal | 1 | +2 life (max 3), fizzles if hit; 1-round cooldown | h |
 
 At most one player is hit per round. At 0 life the other wins and the game's
 stats (rounds, how often each action was picked, ⚠ over 40%) go to the log;
 `/coop rematch` starts over. The host's session is the referee: it holds the
-picks, rejects illegal ones, and decides every round. Greyed buttons are not
-allowed right now.
+picks, rejects illegal ones, and decides every round. Each action has an
+animated card in the pane with its mana cost; greyed cards are not allowed right
+now, and a red number on one counts the rounds of cooldown left.
 
 In a terminal the pane draws the duel under a night sky: two pixel-art wizards
 (host left in blue, guest right in crimson), hearts for lives, mana crystals

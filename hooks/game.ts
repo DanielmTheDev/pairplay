@@ -5,11 +5,14 @@
 import type { Action, Duel, Element, Player } from '../types'
 
 export const ELEMENTS: Element[] = ['fire', 'water', 'nature']
-export const ACTIONS: Action[] = ['charge', 'shield', 'drain', 'heal', ...ELEMENTS, ...ELEMENTS.map(e => `${e}+` as const)]
+export const ACTIONS: Action[] = ['charge', 'supercharge', 'shield', 'drain', 'heal', ...ELEMENTS, ...ELEMENTS.map(e => `${e}+` as const)]
 export const START_LIFE = 3
 export const START_MANA = 1
 export const MAX_MANA = 3
 export const DRAIN_COOLDOWN = 2
+export const SUPER_COOLDOWN = 5
+export const HEAL_COOLDOWN = 1
+export const HEAL_AMOUNT = 2
 /** An action picked more often than this, in a game, wants rebalancing. */
 export const OVERUSED = 0.4
 
@@ -17,9 +20,10 @@ const BEATS: Record<Element, Element> = { water: 'fire', fire: 'nature', nature:
 
 export const COST: Record<Action, number> = {
   charge: 0,
+  supercharge: 0,
   shield: 0,
   drain: 1,
-  heal: 2,
+  heal: 1,
   fire: 1,
   water: 1,
   nature: 1,
@@ -56,14 +60,21 @@ export function isEmpowered(a: Action) {
   return a.endsWith('+')
 }
 
+/** Why `p` may not pick `a` this round; null when they may. */
+export function whyNot(p: Player, a: Action): string | null {
+  if (p.mana < COST[a]) return `needs ${COST[a]} mana`
+  if ((a === 'charge' || a === 'supercharge') && p.mana >= MAX_MANA) return 'mana full'
+  if (a === 'supercharge' && p.superCooldown > 0) return `super in ${p.superCooldown}`
+  if (a === 'shield' && p.shieldLocked) return 'shield locked'
+  if (a === 'drain' && p.drainCooldown > 0) return `drain in ${p.drainCooldown}`
+  if (a === 'heal' && p.life >= START_LIFE) return 'life full'
+  if (a === 'heal' && p.healCooldown > 0) return `heal in ${p.healCooldown}`
+  return null
+}
+
 /** Whether `p` may pick `a` this round. */
 export function legal(p: Player, a: Action) {
-  if (p.mana < COST[a]) return false
-  if (a === 'charge') return p.mana < MAX_MANA
-  if (a === 'shield') return !p.shieldLocked
-  if (a === 'drain') return p.drainCooldown === 0
-  if (a === 'heal') return p.life < START_LIFE
-  return true
+  return whyNot(p, a) === null
 }
 
 export function isDuel(raw: unknown): raw is Duel {
@@ -82,13 +93,15 @@ export function isDuel(raw: unknown): raw is Duel {
         typeof p.mana === 'number' &&
         typeof p.picked === 'boolean' &&
         typeof p.shieldLocked === 'boolean' &&
-        typeof p.drainCooldown === 'number',
+        typeof p.drainCooldown === 'number' &&
+        typeof p.superCooldown === 'number' &&
+        typeof p.healCooldown === 'number',
     )
   )
 }
 
 function fresh(name: string): Player {
-  return { name, life: START_LIFE, mana: START_MANA, picked: false, shieldLocked: false, drainCooldown: 0 }
+  return { name, life: START_LIFE, mana: START_MANA, picked: false, shieldLocked: false, drainCooldown: 0, superCooldown: 0, healCooldown: 0 }
 }
 
 /** Host side: seats a player; null when already seated or both seats are taken. */
@@ -152,25 +165,28 @@ function resolve(duel: Duel, picks: Record<string, Action>): Duel {
   for (const id of [a, b]) {
     const p = duel.players[id]!
     const pick = picks[id]!
-    ps[id] = { ...p, picked: false, mana: p.mana - COST[pick] + (pick === 'charge' ? 1 : 0) }
+    const gain = pick === 'charge' ? 1 : pick === 'supercharge' ? 2 : 0
+    ps[id] = { ...p, picked: false, mana: Math.min(MAX_MANA, p.mana - COST[pick] + gain) }
   }
   // 3. damage (at most one side), then heals that were not hit.
   const dmg = { [a]: damage(picks[a]!, picks[b]!), [b]: damage(picks[b]!, picks[a]!) }
   const loser = dmg[a]! > 0 ? a : dmg[b]! > 0 ? b : null
-  const healed: string[] = []
+  const healed: Record<string, number> = {}
   for (const id of [a, b]) {
     const p = ps[id]!
     p.life = Math.max(0, p.life - dmg[id]!)
     if (picks[id] === 'heal' && dmg[id] === 0) {
-      p.life = Math.min(START_LIFE, p.life + 1)
-      healed.push(id)
+      healed[id] = Math.min(START_LIFE - p.life, HEAL_AMOUNT)
+      p.life += healed[id]
     }
   }
-  // 4. theft: a landed drain takes a mana, if there is one.
+  // 4. theft: a landed drain takes a mana (two from a super charger), if there is any.
   let stole = false
   if (loser && picks[other(loser)] === 'drain' && ps[loser]!.mana > 0) {
-    ps[loser]!.mana--
-    ps[other(loser)]!.mana++
+    const taken = Math.min(ps[loser]!.mana, picks[loser] === 'supercharge' ? 2 : 1)
+    const thief = ps[other(loser)]!
+    ps[loser]!.mana -= taken
+    thief.mana = Math.min(MAX_MANA, thief.mana + taken)
     stole = true
   }
   // 5. timers.
@@ -178,6 +194,8 @@ function resolve(duel: Duel, picks: Record<string, Action>): Duel {
     const p = ps[id]!
     p.shieldLocked = picks[id] === 'shield'
     p.drainCooldown = picks[id] === 'drain' ? DRAIN_COOLDOWN : Math.max(0, p.drainCooldown - 1)
+    p.superCooldown = picks[id] === 'supercharge' ? SUPER_COOLDOWN : Math.max(0, p.superCooldown - 1)
+    p.healCooldown = picks[id] === 'heal' ? HEAL_COOLDOWN : Math.max(0, p.healCooldown - 1)
   }
   // 6. death.
   const dead = loser !== null && ps[loser]!.life <= 0

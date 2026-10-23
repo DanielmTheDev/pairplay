@@ -2,11 +2,14 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Action, Duel, Player } from '../types'
 import {
+  CARD_COLS,
+  CARD_PX_H,
   COLORS,
   GROUND_Y,
   SPRITES,
   SPRITE_TOP,
   STAGE_PX_H,
+  drawCards,
   drawStage,
   encodeCells,
   roundMs,
@@ -22,6 +25,8 @@ const P = (name: string, over: Partial<Player> = {}): Player => ({
   picked: false,
   shieldLocked: false,
   drainCooldown: 0,
+  superCooldown: 0,
+  healCooldown: 0,
   ...over,
 })
 
@@ -41,7 +46,7 @@ const resolved = (hp: Action, gp: Action, loser: 'h' | 'g' | null, life = 2, dmg
       h: P('dani', { life: loser === 'h' ? life : 3 }),
       g: P('caren', { life: loser === 'g' ? life : 3 }),
     },
-    last: { round: 1, picks: { h: hp, g: gp }, loser, dmg: loser ? dmg : 0, stole: false, healed: [] },
+    last: { round: 1, picks: { h: hp, g: gp }, loser, dmg: loser ? dmg : 0, stole: false, healed: {} },
     ...(lethal ? { winner: loser === 'g' ? 'h' : 'g' } : {}),
   })
 }
@@ -199,14 +204,25 @@ function decode(b64: string) {
   return new Uint32Array(bytes.buffer)
 }
 
-test('mana: crystals in the ground under each wizard, lit for mana held', async () => {
+test('mana: gems set in the ground under each wizard, lit for mana held', async () => {
   const d = duel({ players: { h: P('dani', { mana: 3 }), g: P('caren', { mana: 0 }) } })
   const px = drawStage(d, W, view())
-  expect(count(px, COLORS.mana, LEFT)).toBe(12)
-  expect(count(px, COLORS.mana, RIGHT)).toBe(0)
-  expect(count(px, COLORS.manaEmpty, RIGHT)).toBe(12)
-  const one = drawStage(duel(), W, view())
-  expect(count(one, COLORS.mana, LEFT)).toBe(4)
+  const underL: Box = { ...LEFT, y0: GROUND_Y + 1 }
+  const underR: Box = { ...RIGHT, y0: GROUND_Y + 1 }
+  expect(count(px, COLORS.gem[1], underL)).toBe(12)
+  expect(count(px, COLORS.gem[1], underR)).toBe(0)
+  expect(count(px, COLORS.manaEmpty, underR)).toBe(33)
+  // Lit gems glow into the dirt around them, and twinkle.
+  expect(has(px, COLORS.gemGlow, LEFT)).toBe(true)
+  const frames = new Set([0, 200, 400, 600, 800].map(now => drawStage(d, W, view({ now })).join()))
+  expect(frames.size).toBeGreaterThan(1)
+  expect(count(drawStage(duel(), W, view()), COLORS.gem[1], LEFT)).toBe(4)
+})
+
+test('super charge: twice the sparks of a charge', async () => {
+  const d = resolved('supercharge', 'charge', null)
+  const px = drawStage(d, W, view({ t: 800 }))
+  expect(count(px, COLORS.mana, LEFT)).toBeGreaterThan(count(px, COLORS.mana, RIGHT) + 5)
 })
 
 test('selection: an empowered pick shows its element icon; other picks a rune of their own', async () => {
@@ -275,7 +291,7 @@ test('heal: sparkles rise and the heart comes back', async () => {
   const d = duel({
     round: 2,
     players: { h: P('dani', { life: 3 }), g: P('caren') },
-    last: { round: 1, picks: { h: 'heal', g: 'charge' }, loser: null, dmg: 0, stole: false, healed: ['h'] },
+    last: { round: 1, picks: { h: 'heal', g: 'charge' }, loser: null, dmg: 0, stole: false, healed: { h: 1 } },
   })
   expect(count(drawStage(d, W, view({ t: 400 })), COLORS.heartLost, LEFT)).toBe(6)
   expect(has(drawStage(d, W, view({ t: 1700 })), COLORS.healSpark, LEFT)).toBe(true)
@@ -286,7 +302,58 @@ test('heal hit: fizzles, no sparkles', async () => {
   const d = duel({
     round: 2,
     players: { h: P('dani', { life: 1 }), g: P('caren') },
-    last: { round: 1, picks: { h: 'heal', g: 'fire' }, loser: 'h', dmg: 1, stole: false, healed: [] },
+    last: { round: 1, picks: { h: 'heal', g: 'fire' }, loser: 'h', dmg: 1, stole: false, healed: {} },
   })
   for (const t of [800, 1700, 2300]) expect(has(drawStage(d, W, view({ t })), COLORS.healSpark)).toBe(false)
+})
+
+// ─── action cards ────────────────────────────────────────────────────────────
+
+const CW = CARD_COLS
+const card = (px: Uint32Array, i: number, n: number) => {
+  const out: number[] = []
+  for (let y = 0; y < CARD_PX_H; y++) for (let x = i * CW; x < (i + 1) * CW; x++) out.push(px[y * n * CW + x]!)
+  return out
+}
+const gray = (c: number) => ((c >> 16) & 255) === ((c >> 8) & 255) && ((c >> 8) & 255) === (c & 255)
+
+test('cards: one per action, side by side, a transparent gap between', async () => {
+  const px = drawCards(['charge', 'fire'], P('dani'), 0)
+  expect(px.length).toBe(2 * CW * CARD_PX_H)
+  for (let y = 0; y < CARD_PX_H; y++) expect(px[y * 2 * CW + CW - 1]).toBe(0)
+})
+
+test('cards: a ready spell is drawn in its colors, and moves', async () => {
+  const a = card(drawCards(['fire'], P('dani'), 0), 0, 1)
+  expect(a.some(c => (COLORS.spell.fire as readonly number[]).includes(c))).toBe(true)
+  const frames = new Set([0, 150, 300, 450].map(now => drawCards(['fire'], P('dani'), now).join()))
+  expect(frames.size).toBeGreaterThan(1)
+  for (const act of ['charge', 'supercharge', 'shield', 'drain', 'water', 'nature', 'water+'] as const) {
+    expect(card(drawCards([act], P('dani', { life: 2 }), 0), 0, 1).some(c => c !== 0 && !gray(c))).toBe(true)
+  }
+  // Each its own drawing.
+  const looks = new Set((['charge', 'supercharge', 'shield', 'drain', 'heal', 'fire', 'fire+'] as const).map(a => drawCards([a], P('dani', { life: 2, mana: 2 }), 0).join()))
+  expect(looks.size).toBe(7)
+})
+
+test('cards: what is not allowed is grey; a cooldown shows its rounds left in red', async () => {
+  const p = P('dani', { mana: 1, shieldLocked: true, drainCooldown: 2 })
+  const px = drawCards(['fire+', 'shield', 'drain', 'fire'], p, 0)
+  const [big, shield, drain, fire] = [0, 1, 2, 3].map(i => card(px, i, 4))
+  expect(big!.every(c => c === 0 || gray(c) || c === COLORS.manaShort)).toBe(true)
+  expect(big!.includes(COLORS.cooldown)).toBe(false)
+  expect(shield!.includes(COLORS.cooldown)).toBe(true)
+  expect(drain!.includes(COLORS.cooldown)).toBe(true)
+  expect(fire!.includes(COLORS.cooldown)).toBe(false)
+})
+
+test('cards: cost shown as mana pips, missing ones marked', async () => {
+  const pips = (a: 'charge' | 'fire' | 'fire+', mana: number) => {
+    const c = card(drawCards([a], P('dani', { mana }), 0), 0, 1)
+    return [c.filter(x => x === COLORS.mana).length, c.filter(x => x === COLORS.manaShort).length]
+  }
+  expect(pips('charge', 1)).toEqual([0, 0])
+  expect(pips('fire', 1)).toEqual([2, 0])
+  expect(pips('fire+', 2)).toEqual([4, 0])
+  expect(pips('fire+', 1)).toEqual([0, 4])
 })
