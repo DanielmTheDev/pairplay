@@ -32,7 +32,7 @@ Needs `curl` on the PATH (it holds the live connection to the relay).
 | duel: `/coop cast fire` (or 🔥 💧 🌿 in the pane, keys 1-3) | `/coop cast water` |
 
 Mage duel: water beats fire, fire beats nature, nature beats water. Both pick in
-secret; when both have picked the round resolves and the loser loses one of 3
+secret (and may change their pick until the other has picked); when both have picked the round resolves and the loser loses one of 3
 lives. At 0 the other player wins; `/coop rematch` starts over. The host's
 session is the referee: it holds the picks and decides every round.
 

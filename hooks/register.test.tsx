@@ -79,8 +79,12 @@ test('join rejects a malformed code', async ($, on) => {
 const ntfy = (id: string, env: object) =>
   JSON.stringify({ event: 'message', id, message: JSON.stringify({ v: 1, ...env }) }) + '\n'
 
-function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[]) {
+type Opts = { failFirst?: number; gate?: Promise<void> }
+
+function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[], opts: Opts = {}) {
   const posts: { type: string; payload?: unknown }[] = []
+  const attempts: string[] = []
+  let failures = opts.failFirst ?? 0
   const blits: unknown[] = []
   on('ui.blit', (_, e) => {
     blits.push(e)
@@ -94,15 +98,23 @@ function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[])
   on('env.get', () => ({ value: 'alice' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('http.fetch', (_, e) => {
-    posts.push(JSON.parse(e.init?.body ?? '{}'))
+    const body = e.init?.body ?? '{}'
+    attempts.push(body)
+    if (failures > 0) {
+      failures--
+      return { value: { status: 503, ok: false, headers: {}, text: '' } }
+    }
+    posts.push(JSON.parse(body))
     return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
   })
   on('process.spawn', async function* () {
-    yield { stream: 'stdout' as const, text: '{"event":"open"}\n' + lines.join('') }
+    yield { stream: 'stdout' as const, text: '{"event":"open"}\n' }
+    if (opts.gate) await opts.gate
+    yield { stream: 'stdout' as const, text: lines.join('') }
     await new Promise(() => {})
     return { code: 0, signal: null }
   })
-  return Object.assign(posts, { blits, clock })
+  return Object.assign(posts, { blits, clock, attempts })
 }
 
 const state = (posts: { type: string; payload?: unknown }[]) =>
@@ -195,4 +207,109 @@ test('guest: own pick shows as its icon on the stage', async ($, on) => {
   expect(words.includes(COLORS.icon.fire)).toBe(false)
   expect(await ui.find({ type: 'Button', key: 'nature' })).toMatchObject({ props: { label: '🌿' } })
   await ui.unmount()
+})
+
+const states = (posts: { type: string; payload?: unknown }[]) => posts.filter(p => p.type === 'state')
+const settle = () => new Promise(r => setTimeout(r, 50))
+
+test('host: answers even a rejected intent with its state', async ($, on) => {
+  const posts = harness(on, [
+    ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
+    ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'cast', element: 'lava' } }),
+  ])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'host' })
+  await settle()
+  expect(states(posts).length).toBe(2)
+})
+
+test('host: a peer behind (ping with an old seq, or sync) gets the state again', async ($, on) => {
+  const posts = harness(on, [
+    ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
+    ntfy('m2', { from: 'peer', name: 'caren', type: 'ping', payload: { seq: 0 } }),
+    ntfy('m3', { from: 'peer', name: 'caren', type: 'ping', payload: { seq: 999 } }),
+    ntfy('m4', { from: 'peer', name: 'caren', type: 'sync' }),
+  ])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'host' })
+  await settle()
+  // hello, the stale ping and the sync each get one; the current ping none.
+  expect(states(posts).length).toBe(3)
+})
+
+test('guest: asks for a sync when the host is ahead; pings carry its seq', async ($, on) => {
+  const posts = harness(on, [
+    ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: { seq: 4, round: 1, players: {} } }),
+    ntfy('m2', { from: 'host', name: 'dani', type: 'ping', payload: { seq: 4 } }),
+    ntfy('m3', { from: 'host', name: 'dani', type: 'ping', payload: { seq: 9 } }),
+  ])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  expect(posts.filter(p => p.type === 'sync').length).toBe(1)
+  await posts.clock.advance(61_000)
+  expect(posts.filter(p => p.type === 'ping').at(-1)?.payload).toEqual({ seq: 4 })
+})
+
+test('send: retries until the relay takes it', async ($, on) => {
+  const posts = harness(on, [ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' })], { failFirst: 2 })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'host' })
+  await settle()
+  await posts.clock.advance(10_000)
+  await settle()
+  expect(states(posts).length).toBeGreaterThanOrEqual(1)
+  expect(posts.attempts.length).toBeGreaterThanOrEqual(3)
+})
+
+test('guest: resends a cast nobody answered, stops once answered', async ($, on) => {
+  const duel = { seq: 5, round: 1, players: { host: { name: 'dani', life: 3, picked: false }, 'my-session': { name: 'alice', life: 3, picked: false } } }
+  const posts = harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  await $.command.run({ command: 'coop', args: 'cast fire' })
+  const intents = () => posts.filter(p => p.type === 'intent').length
+  expect(intents()).toBe(1)
+  await posts.clock.advance(3500)
+  expect(intents()).toBe(2)
+  await posts.clock.advance(60_000)
+  // Gives up after a few tries rather than flooding the relay.
+  expect(intents()).toBeLessThanOrEqual(4)
+})
+
+test('host: own cast and a guest intent at the same moment both count', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(r => (open = r))
+  const posts = harness(
+    on,
+    [
+      ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
+      ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'cast', element: 'fire' } }),
+    ],
+    { gate },
+  )
+  // Slow state reads, like a busy engine: lets the two writers interleave.
+  on('state.get', async (_, e, next) => {
+    await new Promise(r => setTimeout(r, 2))
+    return next(e)
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'host' })
+  await settle()
+  const mine = $.command.run({ command: 'coop', args: 'cast water' })
+  open()
+  await mine
+  const resolved = () => (states(posts).at(-1)?.payload as Record<string, any> | undefined)?.last
+  for (let i = 0; i < 80 && !resolved(); i++) await new Promise(r => setTimeout(r, 25))
+  const last = states(posts).at(-1)?.payload as Record<string, any>
+  expect(last.last?.picks).toEqual({ peer: 'fire', 'my-session': 'water' })
+  // No two different snapshots under one seq.
+  const bySeq = new Map<number, string>()
+  for (const st of states(posts)) {
+    const d = st.payload as { seq: number }
+    const json = JSON.stringify(d)
+    expect(bySeq.get(d.seq) ?? json).toBe(json)
+    bySeq.set(d.seq, json)
+  }
 })

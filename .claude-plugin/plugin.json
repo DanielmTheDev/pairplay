@@ -1,6 +1,6 @@
 {
   "name": "pairplay",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Two-player co-op between Claude Code sessions: rooms, presence and chat over an ntfy relay",
   "author": {
     "name": "Daniel Muckelbauer"

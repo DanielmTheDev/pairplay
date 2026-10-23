@@ -53,10 +53,23 @@ test('tie: nobody loses life', async () => {
   expect(two.duel.last?.loser).toBe(null)
 })
 
-test('rejects: unseated, double cast, bad element, junk', async () => {
+test('recast: changes the hidden pick while the other has not picked', async () => {
+  const one = cast(start(), 'g', 'fire')!
+  const two = cast(one, 'g', 'water')!
+  expect(two.picks).toEqual({ g: 'water' })
+  expect(two.duel.players.g?.picked).toBe(true)
+  expect(two.duel.seq).toBe(one.duel.seq + 1)
+  expect(JSON.stringify(two.duel)).not.toContain('water')
+  // The same pick again (a resent intent) changes nothing.
+  expect(cast(two, 'g', 'water')).toBe(null)
+  // Once the other picks, the round resolves with the changed pick.
+  const done = cast(two, 'h', 'nature')!
+  expect(done.duel.last?.picks).toEqual({ g: 'water', h: 'nature' })
+})
+
+test('rejects: unseated, bad element, junk', async () => {
   const s = start()
   expect(cast(s, 'x', 'fire')).toBe(null)
-  expect(cast(cast(s, 'g', 'fire')!, 'g', 'water')).toBe(null)
   expect(cast(s, 'g', 'lava')).toBe(null)
   expect(applyIntent(s, 'g', undefined)).toBe(null)
   expect(applyIntent(s, 'g', { kind: 'nuke' })).toBe(null)

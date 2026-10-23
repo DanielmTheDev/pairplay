@@ -45,6 +45,20 @@ export function subscribeUrl(relay: string, code: string, lastId?: string): stri
   return lastId ? `${base}?since=${encodeURIComponent(lastId)}` : base
 }
 
+/**
+ * curl holding the stream. ntfy sends a keepalive every 45s, so a link silent
+ * for 100s is dead (sleep, network switch, NAT drop): curl exits and we resume.
+ */
+export function curlArgs(url: string): string[] {
+  return ['curl', '-sN', '--fail', '--connect-timeout', '10', '--speed-time', '100', '--speed-limit', '1', url]
+}
+
+/** Wait before resend `attempt` (0-based) of a failed publish; null: give up. */
+export function retryDelay(attempt: number, status: number): number | null {
+  if (attempt >= 4) return null
+  return (status === 429 ? 2000 : 500) * 2 ** attempt
+}
+
 export function publishUrl(relay: string, code: string): string {
   return `${relay.replace(/\/+$/, '')}/${topicFor(code)}`
 }

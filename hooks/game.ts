@@ -63,7 +63,10 @@ export function applyIntent(state: HostState, player: string, intent: unknown): 
 
   if (i.kind !== 'cast' || !isElement(i.element)) return null
   const me = duel.players[player]
-  if (!me || me.picked || duel.winner !== undefined) return null
+  if (!me || duel.winner !== undefined) return null
+  // A recast changes the hidden pick (the other has not picked, or the round
+  // would have resolved); the same pick again, a resent intent, changes nothing.
+  if (me.picked && state.picks[player] === i.element) return null
 
   const picks = { ...state.picks, [player]: i.element }
   const ids = Object.keys(duel.players)

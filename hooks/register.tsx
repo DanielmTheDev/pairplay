@@ -7,11 +7,13 @@ import { FRAME_MS, STAGE_PX_H, STAGE_ROWS, drawStage, encodeCells, roundMs, stag
 import {
   PING_MS,
   PROTOCOL,
+  curlArgs,
   livePeers,
   makeRoomCode,
   normalizeRoomCode,
   parseLine,
   publishUrl,
+  retryDelay,
   splitLines,
   subscribeUrl,
   type Envelope,
@@ -50,6 +52,11 @@ let generation = 0
 let stream: AsyncGenerator<unknown, unknown> | undefined
 let pinger: { cancel(): void } | undefined
 let backoffMs = 1000
+// Host: every change to the duel runs one at a time, in arrival order.
+let hostQueue: Promise<unknown> = Promise.resolve()
+// Guest: a cast not answered yet, resent a few times; `states` counts snapshots seen.
+let pending: { intent: unknown; states: number; tries: number } | undefined
+let statesSeen = 0
 // The stage loop: one timer while in a room, blitting a frame each tick (idle
 // stars and blinks, or the round in `anim`). Transient, so module variables.
 let anim: { t0: number } | undefined
@@ -68,23 +75,38 @@ async function refreshStatus($: $) {
   $.ui.status(`coop ${r.code} · ${c === 'live' ? `${n} peer${n === 1 ? '' : 's'}` : c}`)
 }
 
+/** Publishes, retrying with backoff; false once it gave up or the room changed. Never throws. */
 async function send($: $, type: string, payload?: unknown) {
+  try {
+    return await publish($, type, payload)
+  } catch {
+    return false
+  }
+}
+
+async function publish($: $, type: string, payload?: unknown) {
   const r = await read($, room)
   if (!r) return false
+  const gen = generation
   const env: Envelope = { v: PROTOCOL, from: me, name: myName, type, payload }
-  try {
-    const res = await $.http.fetch(publishUrl(relay, r.code), {
-      method: 'POST',
-      body: JSON.stringify(env),
-    })
-    if (!res.ok) {
-      const why = res.status === 429 ? ' (relay rate limit, try a self-hosted relayUrl)' : ''
-      await addLog($, 'relay', `send failed: HTTP ${res.status}${why}`)
+  for (let attempt = 0; ; attempt++) {
+    let status = 0
+    let why = ''
+    try {
+      const res = await $.http.fetch(publishUrl(relay, r.code), { method: 'POST', body: JSON.stringify(env) })
+      if (res.ok) return true
+      status = res.status
+      why = `HTTP ${res.status}${res.status === 429 ? ' (relay rate limit, try a self-hosted relayUrl)' : ''}`
+    } catch (err) {
+      why = String(err)
     }
-    return res.ok
-  } catch (err) {
-    await addLog($, 'relay', `send failed: ${String(err)}`)
-    return false
+    const wait = retryDelay(attempt, status)
+    if (wait === null) {
+      await addLog($, 'relay', `send failed: ${why}`)
+      return false
+    }
+    await $.clock.sleep(wait)
+    if (gen !== generation) return false
   }
 }
 
@@ -110,11 +132,22 @@ async function handle($: $, env: Envelope) {
       if (await isHost($)) await hostSeat($, env.from, env.name)
       return
     case 'here':
-    case 'ping':
+    case 'ping': {
       if (await seen($, env)) {
         await addLog($, env.name, 'is here')
         $.ui.toast(`coop: ${env.name} is here`)
       }
+      // Pings carry the sender's duel seq: whoever is behind catches up.
+      const theirs = (env.payload as { seq?: unknown } | undefined)?.seq
+      if (typeof theirs !== 'number') return
+      const ours = (await read($, game)).seq
+      if (await isHost($)) {
+        if (theirs < ours) void send($, 'state', await read($, game))
+      } else if (theirs > ours) void send($, 'sync')
+      return
+    }
+    case 'sync':
+      if (await isHost($)) void send($, 'state', await read($, game))
       return
     case 'bye':
       await update($, peers, all => {
@@ -133,11 +166,15 @@ async function handle($: $, env: Envelope) {
     }
     case 'intent':
       await seen($, env)
-      if (await isHost($)) await hostApply($, env.from, env.name, env.payload)
+      // Answered even when refused: the guest learns the truth either way.
+      if (await isHost($) && !(await hostApply($, env.from, env.name, env.payload))) {
+        void send($, 'state', await read($, game))
+      }
       return
     case 'state':
       await seen($, env)
       if (!(await isHost($))) {
+        statesSeen++
         const before = await read($, game)
         await update($, game, current => acceptSnapshot(current, env.payload))
         await onDuelChange($, before, await read($, game))
@@ -150,15 +187,28 @@ async function isHost($: $) {
   return (await read($, room))?.role === 'host'
 }
 
+/** Runs host changes one after another: two at once would each miss the other's write. */
+function serial<T>(fn: () => Promise<T>): Promise<T> {
+  const run = hostQueue.then(fn, fn)
+  hostQueue = run.catch(() => {})
+  return run
+}
+
 /** Seats a player (both, after a reload lost nothing but a seat) and broadcasts. */
-async function hostSeat($: $, id: string, name: string) {
-  await update($, game, d => seat(d, me, myName) ?? d)
-  await update($, game, d => seat(d, id, name) ?? d)
-  await send($, 'state', await read($, game))
+function hostSeat($: $, id: string, name: string) {
+  return serial(async () => {
+    await update($, game, d => seat(d, me, myName) ?? d)
+    await update($, game, d => seat(d, id, name) ?? d)
+    void send($, 'state', await read($, game))
+  })
 }
 
 /** The one place the duel changes: on the host, then broadcast as a snapshot. */
-async function hostApply($: $, id: string, name: string, intent: unknown) {
+function hostApply($: $, id: string, name: string, intent: unknown) {
+  return serial(() => hostApplyNow($, id, name, intent))
+}
+
+async function hostApplyNow($: $, id: string, name: string, intent: unknown) {
   await update($, game, d => seat(d, me, myName) ?? d)
   await update($, game, d => seat(d, id, name) ?? d)
   const before = await read($, game)
@@ -166,7 +216,8 @@ async function hostApply($: $, id: string, name: string, intent: unknown) {
   if (!next) return null
   await update($, picks, () => next.picks)
   await update($, game, () => next.duel)
-  await send($, 'state', next.duel)
+  // Not awaited: retries must not hold up the next change; seq orders them.
+  void send($, 'state', next.duel)
   await onDuelChange($, before, next.duel)
   return next.duel
 }
@@ -180,7 +231,7 @@ async function onDuelChange($: $, before: Duel, after: Duel) {
 }
 
 function startLoop($: $) {
-  loop ??= $.clock.every(FRAME_MS, () => void tick($))
+  loop ??= $.clock.every(FRAME_MS, () => void quietly(() => tick($)))
 }
 
 function stopLoop() {
@@ -220,17 +271,45 @@ async function tick($: $) {
 async function act($: $, intent: { kind: 'cast'; element: string } | { kind: 'rematch' }) {
   if (!(await read($, room))) return 'Not in a room.'
   if (!(await isHost($))) {
-    if (!(await send($, 'intent', intent))) return 'Send failed, see pane.'
     if (intent.kind === 'cast' && isElement(intent.element)) {
       const element = intent.element
       const round = (await read($, game)).round
       await update($, mine, () => ({ round, element }))
     }
+    pending = { intent, states: statesSeen, tries: 0 }
+    $.clock.after(RESEND_MS, () => void quietly(() => resend($)))
+    void send($, 'intent', intent)
     return `${describe(intent)} sent to host`
   }
   const d = await hostApply($, me, myName, intent)
   if (!d) return `${describe(intent)}: not allowed now`
   return d.last && d.last.round === d.round - 1 && intent.kind === 'cast' ? `cast ${intent.element}, round resolves…` : describe(intent)
+}
+
+const RESEND_MS = 3000
+
+/** For timer callbacks: one that fails (the session is ending) has nobody to tell. */
+async function quietly(fn: () => Promise<unknown>) {
+  try {
+    await fn()
+  } catch {}
+}
+
+/** No snapshot since the cast went out: say it again, a few times at most. */
+async function resend($: $) {
+  const p = pending
+  if (!p || statesSeen > p.states) {
+    pending = undefined
+    return
+  }
+  if (p.tries >= 3) {
+    pending = undefined
+    await addLog($, 'relay', 'host did not answer; try again')
+    return
+  }
+  p.tries++
+  void send($, 'intent', p.intent)
+  $.clock.after(RESEND_MS, () => void quietly(() => resend($)))
 }
 
 function describe(intent: { kind: string; element?: string }) {
@@ -263,7 +342,7 @@ async function subscribe($: $, gen: number) {
   await update($, conn, () => 'connecting')
   await refreshStatus($)
   const child = $.process.spawn({
-    argv: ['curl', '-sN', '--fail', '--connect-timeout', '10', subscribeUrl(relay, r.code, r.lastId)],
+    argv: curlArgs(subscribeUrl(relay, r.code, r.lastId)),
   })
   stream = child
   let buffer = ''
@@ -292,12 +371,13 @@ async function subscribe($: $, gen: number) {
   await refreshStatus($)
   const wait = backoffMs
   backoffMs = Math.min(backoffMs * 2, 30_000)
-  $.clock.after(wait, () => void subscribe($, gen))
+  $.clock.after(wait, () => void quietly(() => subscribe($, gen)))
 }
 
 function stop() {
   generation++
   stopLoop()
+  pending = undefined
   pinger?.cancel()
   pinger = undefined
   void stream?.return(undefined)
@@ -308,13 +388,13 @@ async function start($: $) {
   stop()
   const gen = generation
   backoffMs = 1000
-  void subscribe($, gen)
+  void quietly(() => subscribe($, gen))
   // Announce once the stream had a moment to open, so the answer isn't missed.
   $.clock.after(1500, () => void send($, 'hello'))
   startLoop($)
   pinger = $.clock.every(PING_MS, () => {
-    void send($, 'ping')
-    void refreshStatus($)
+    void quietly(async () => void send($, 'ping', { seq: (await read($, game)).seq }))
+    void quietly(() => refreshStatus($))
   })
 }
 
@@ -355,6 +435,10 @@ async function say($: $, text: string) {
 
 export const register: Register = (on, options) => {
   relay = String(options.relayUrl || 'https://ntfy.sh')
+  // A fresh activation owns nothing of an earlier one's timers or queue.
+  stop()
+  hostQueue = Promise.resolve()
+  statesSeen = 0
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)

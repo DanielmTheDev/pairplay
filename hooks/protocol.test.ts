@@ -7,6 +7,8 @@ import {
   parseLine,
   splitLines,
   subscribeUrl,
+  curlArgs,
+  retryDelay,
   STALE_MS,
 } from './protocol'
 
@@ -47,4 +49,21 @@ test('ntfy events parse into open, message or skip', async () => {
 test('peers go stale', async () => {
   const peers = { a: { name: 'a', lastSeen: 0 }, b: { name: 'b', lastSeen: 100 } }
   expect(livePeers(peers, STALE_MS + 50).map(([id]) => id)).toEqual(['b'])
+})
+
+test('curl gives up on a silent stream so it reconnects', async () => {
+  const argv = curlArgs('https://ntfy.sh/t/json')
+  expect(argv[0]).toBe('curl')
+  expect(argv.at(-1)).toBe('https://ntfy.sh/t/json')
+  // ntfy keeps alive every 45s: well over that with no byte means the link is dead.
+  const i = argv.indexOf('--speed-time')
+  expect(Number(argv[i + 1])).toBeGreaterThan(45)
+  expect(argv[argv.indexOf('--speed-limit') + 1]).toBe('1')
+})
+
+test('send retries back off, longer on a rate limit, then give up', async () => {
+  expect(retryDelay(0, 500)).toBe(500)
+  expect(retryDelay(1, 500)).toBeGreaterThan(retryDelay(0, 500))
+  expect(retryDelay(0, 429)).toBeGreaterThan(retryDelay(0, 500))
+  expect(retryDelay(4, 500)).toBe(null)
 })
