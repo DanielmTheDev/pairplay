@@ -1,19 +1,38 @@
-// Host-authoritative duel, pure: the host alone applies intents and broadcasts
+// Host-authoritative mana duel, pure: the host alone applies intents and broadcasts
 // numbered snapshots; guests send intents and keep the newest snapshot.
 // Picks live in HostState.picks, never in the broadcast Duel, until a round resolves.
 
-import type { Duel, Element } from '../types'
+import type { Action, Duel, Element, Player } from '../types'
 
 export const ELEMENTS: Element[] = ['fire', 'water', 'nature']
+export const ACTIONS: Action[] = ['charge', 'shield', 'drain', 'heal', ...ELEMENTS, ...ELEMENTS.map(e => `${e}+` as const)]
 export const START_LIFE = 3
+export const START_MANA = 1
+export const MAX_MANA = 3
+export const DRAIN_COOLDOWN = 2
+/** An action picked more often than this, in a game, wants rebalancing. */
+export const OVERUSED = 0.4
 
 const BEATS: Record<Element, Element> = { water: 'fire', fire: 'nature', nature: 'water' }
 
+export const COST: Record<Action, number> = {
+  charge: 0,
+  shield: 0,
+  drain: 1,
+  heal: 2,
+  fire: 1,
+  water: 1,
+  nature: 1,
+  'fire+': 2,
+  'water+': 2,
+  'nature+': 2,
+}
+
 export const INITIAL_DUEL: Duel = { seq: 0, round: 1, players: {} }
 
-export type HostState = { duel: Duel; picks: Record<string, Element> }
+export type HostState = { duel: Duel; picks: Record<string, Action> }
 
-export type Intent = { kind: 'cast'; element: Element } | { kind: 'rematch' }
+export type Intent = { kind: 'act'; action: Action } | { kind: 'rematch' }
 
 export function beats(a: Element, b: Element) {
   return BEATS[a] === b
@@ -21,6 +40,30 @@ export function beats(a: Element, b: Element) {
 
 export function isElement(raw: unknown): raw is Element {
   return typeof raw === 'string' && (ELEMENTS as string[]).includes(raw)
+}
+
+export function isAction(raw: unknown): raw is Action {
+  return typeof raw === 'string' && (ACTIONS as string[]).includes(raw)
+}
+
+/** The element of a basic or empowered spell; undefined for anything else. */
+export function elementOf(a: Action): Element | undefined {
+  const el = a.replace(/\+$/, '')
+  return isElement(el) ? el : undefined
+}
+
+export function isEmpowered(a: Action) {
+  return a.endsWith('+')
+}
+
+/** Whether `p` may pick `a` this round. */
+export function legal(p: Player, a: Action) {
+  if (p.mana < COST[a]) return false
+  if (a === 'charge') return p.mana < MAX_MANA
+  if (a === 'shield') return !p.shieldLocked
+  if (a === 'drain') return p.drainCooldown === 0
+  if (a === 'heal') return p.life < START_LIFE
+  return true
 }
 
 export function isDuel(raw: unknown): raw is Duel {
@@ -32,43 +75,48 @@ export function isDuel(raw: unknown): raw is Duel {
     !!d.players &&
     typeof d.players === 'object' &&
     Object.values(d.players).every(
-      p => !!p && typeof p.name === 'string' && typeof p.life === 'number' && typeof p.picked === 'boolean',
+      p =>
+        !!p &&
+        typeof p.name === 'string' &&
+        typeof p.life === 'number' &&
+        typeof p.mana === 'number' &&
+        typeof p.picked === 'boolean' &&
+        typeof p.shieldLocked === 'boolean' &&
+        typeof p.drainCooldown === 'number',
     )
   )
+}
+
+function fresh(name: string): Player {
+  return { name, life: START_LIFE, mana: START_MANA, picked: false, shieldLocked: false, drainCooldown: 0 }
 }
 
 /** Host side: seats a player; null when already seated or both seats are taken. */
 export function seat(duel: Duel, id: string, name: string): Duel | null {
   if (duel.players[id] || Object.keys(duel.players).length >= 2) return null
-  return {
-    ...duel,
-    seq: duel.seq + 1,
-    players: { ...duel.players, [id]: { name, life: START_LIFE, picked: false } },
-  }
+  return { ...duel, seq: duel.seq + 1, players: { ...duel.players, [id]: fresh(name) } }
 }
 
 /** Host side: the next state, or null when the intent is not allowed. */
 export function applyIntent(state: HostState, player: string, intent: unknown): HostState | null {
   if (!intent || typeof intent !== 'object') return null
   const { duel } = state
-  const i = intent as { kind?: unknown; element?: unknown }
+  const i = intent as { kind?: unknown; action?: unknown }
 
   if (i.kind === 'rematch') {
     if (duel.winner === undefined) return null
-    const players = Object.fromEntries(
-      Object.entries(duel.players).map(([id, p]) => [id, { ...p, life: START_LIFE, picked: false }]),
-    )
+    const players = Object.fromEntries(Object.entries(duel.players).map(([id, p]) => [id, fresh(p.name)]))
     return { duel: { seq: duel.seq + 1, round: 1, players }, picks: {} }
   }
 
-  if (i.kind !== 'cast' || !isElement(i.element)) return null
+  if (i.kind !== 'act' || !isAction(i.action)) return null
   const me = duel.players[player]
-  if (!me || duel.winner !== undefined) return null
+  if (!me || duel.winner !== undefined || !legal(me, i.action)) return null
   // A recast changes the hidden pick (the other has not picked, or the round
   // would have resolved); the same pick again, a resent intent, changes nothing.
-  if (me.picked && state.picks[player] === i.element) return null
+  if (me.picked && state.picks[player] === i.action) return null
 
-  const picks = { ...state.picks, [player]: i.element }
+  const picks = { ...state.picks, [player]: i.action }
   const ids = Object.keys(duel.players)
   if (ids.length < 2 || !ids.every(id => picks[id])) {
     return {
@@ -79,23 +127,87 @@ export function applyIntent(state: HostState, player: string, intent: unknown): 
   return { duel: resolve(duel, picks), picks: {} }
 }
 
-function resolve(duel: Duel, picks: Record<string, Element>): Duel {
+/** Damage `target` takes from `attacker` this round. */
+function damage(target: Action, attacker: Action) {
+  const atk = elementOf(attacker)
+  if (!atk && attacker !== 'drain') return 0
+  if (target === 'shield') return 0
+  const power = isEmpowered(attacker) ? 2 : 1
+  const def = elementOf(target)
+  if (!def) {
+    // Charge, heal, or a drain: an element beats a drain, two drains tie.
+    return target === 'drain' && !atk ? 0 : power
+  }
+  if (!atk) return 0
+  if (beats(atk, def)) return power
+  if (atk === def && isEmpowered(attacker) && !isEmpowered(target)) return 1
+  return 0
+}
+
+function resolve(duel: Duel, picks: Record<string, Action>): Duel {
   const [a, b] = Object.keys(duel.players) as [string, string]
-  const loser = beats(picks[a]!, picks[b]!) ? b : beats(picks[b]!, picks[a]!) ? a : null
-  const players = Object.fromEntries(
-    Object.entries(duel.players).map(([id, p]) => [
-      id,
-      { ...p, picked: false, life: id === loser ? p.life - 1 : p.life },
-    ]),
-  )
-  const dead = loser !== null && players[loser]!.life <= 0
+  const other = (id: string) => (id === a ? b : a)
+  const ps: Record<string, Player> = {}
+  // 1. costs, 2. charges.
+  for (const id of [a, b]) {
+    const p = duel.players[id]!
+    const pick = picks[id]!
+    ps[id] = { ...p, picked: false, mana: p.mana - COST[pick] + (pick === 'charge' ? 1 : 0) }
+  }
+  // 3. damage (at most one side), then heals that were not hit.
+  const dmg = { [a]: damage(picks[a]!, picks[b]!), [b]: damage(picks[b]!, picks[a]!) }
+  const loser = dmg[a]! > 0 ? a : dmg[b]! > 0 ? b : null
+  const healed: string[] = []
+  for (const id of [a, b]) {
+    const p = ps[id]!
+    p.life = Math.max(0, p.life - dmg[id]!)
+    if (picks[id] === 'heal' && dmg[id] === 0) {
+      p.life = Math.min(START_LIFE, p.life + 1)
+      healed.push(id)
+    }
+  }
+  // 4. theft: a landed drain takes a mana, if there is one.
+  let stole = false
+  if (loser && picks[other(loser)] === 'drain' && ps[loser]!.mana > 0) {
+    ps[loser]!.mana--
+    ps[other(loser)]!.mana++
+    stole = true
+  }
+  // 5. timers.
+  for (const id of [a, b]) {
+    const p = ps[id]!
+    p.shieldLocked = picks[id] === 'shield'
+    p.drainCooldown = picks[id] === 'drain' ? DRAIN_COOLDOWN : Math.max(0, p.drainCooldown - 1)
+  }
+  // 6. death.
+  const dead = loser !== null && ps[loser]!.life <= 0
+  const tally = { ...duel.tally }
+  for (const id of [a, b]) tally[picks[id]!] = (tally[picks[id]!] ?? 0) + 1
   return {
     seq: duel.seq + 1,
     round: duel.round + 1,
-    players,
-    last: { round: duel.round, picks: { [a]: picks[a]!, [b]: picks[b]! }, loser },
-    ...(dead ? { winner: loser === a ? b : a } : {}),
+    players: ps,
+    tally,
+    last: { round: duel.round, picks: { [a]: picks[a]!, [b]: picks[b]! }, loser, dmg: loser ? dmg[loser]! : 0, stole, healed },
+    ...(dead ? { winner: other(loser) } : {}),
   }
+}
+
+/** One line for a finished game: who won, how long it took, what was picked how often. */
+export function summary(duel: Duel) {
+  const tally = Object.entries(duel.tally ?? {}).sort(([, x], [, y]) => y - x)
+  const total = tally.reduce((n, [, k]) => n + k, 0)
+  const picks = tally.map(([a, k]) => {
+    const share = k / total
+    return `${a} ${k} (${Math.round(share * 100)}%)${share > OVERUSED ? ' ⚠' : ''}`
+  })
+  const never = ACTIONS.filter(a => !duel.tally?.[a])
+  const winner = duel.winner ? duel.players[duel.winner]?.name : undefined
+  return [
+    `${winner ?? 'nobody'} won in ${duel.last?.round ?? 0} rounds`,
+    ...(picks.length ? [picks.join(', ')] : []),
+    ...(never.length ? [`never: ${never.join(', ')}`] : []),
+  ].join(' · ')
 }
 
 /** Guest side: a replayed or reordered snapshot never rolls the state back. */

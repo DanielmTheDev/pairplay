@@ -29,18 +29,32 @@ Needs `curl` on the PATH (it holds the live connection to the relay).
 | `/coop host` → room code shown and copied | |
 | send the code to player 2 | `/coop join ABCD-EFGH` |
 | chat: type in the pane, or `/coop say hi` | same |
-| duel: `/coop cast fire` (or 🔥 💧 🌿 in the pane, keys 1-3) | `/coop cast water` |
+| duel: `/coop charge`, `/coop fire+` … (or the pane buttons) | `/coop shield` |
 
-Mage duel: water beats fire, fire beats nature, nature beats water. Both pick in
-secret (and may change their pick until the other has picked); when both have picked the round resolves and the loser loses one of 3
-lives. At 0 the other player wins; `/coop rematch` starts over. The host's
-session is the referee: it holds the picks and decides every round.
+Mana duel (full rules: `mana-spec.md`). 3 life, start with 1 mana, cap 3. Both
+pick one action in secret (changeable until the other has picked):
+
+| Action | Cost | Effect | Key |
+| --- | --- | --- | --- |
+| charge | 0 | +1 mana (not at 3) | c |
+| shield | 0 | blocks all damage and theft; not two rounds in a row | s |
+| fire / water / nature | 1 | 1 damage; water > fire > nature > water | 1-3 |
+| fire+ / water+ / nature+ | 2 | 2 damage; beats a same-element basic for 1 | 4-6 |
+| drain | 1 | 1 damage + steals 1 mana; loses to any element; 2-round cooldown | d |
+| heal | 2 | +1 life, fizzles if hit | h |
+
+At most one player is hit per round. At 0 life the other wins and the game's
+stats (rounds, how often each action was picked, ⚠ over 40%) go to the log;
+`/coop rematch` starts over. The host's session is the referee: it holds the
+picks, rejects illegal ones, and decides every round. Greyed buttons are not
+allowed right now.
 
 In a terminal the pane draws the duel under a night sky: two pixel-art wizards
-(host left in blue, guest right in crimson), hearts for lives, your own pick as
-an icon over your head (the other player sees a rune). Each round plays out:
-fireballs, torrents and ground vines clash mid-stage, the winning spell hits
-home. The last hit kills: the loser topples into a lot of blood, the winner
+(host left in blue, guest right in crimson), hearts for lives, mana crystals
+in the ground, your own pick as an icon over your head (the other player sees a
+rune). Each round plays out: fireballs, torrents, ground vines and violet drains
+clash mid-stage (empowered ones blaze bigger), shields catch them, charges pull
+in mana, heals sparkle, the winning spell hits home. The last hit kills: the loser topples into a lot of blood, the winner
 strikes a victory pose. Needs a truecolor terminal.
 
 `/coop` opens the pane, `/coop leave` leaves the room. The status line shows

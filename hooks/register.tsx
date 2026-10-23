@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Conn, Duel, Element, LogLine, Peer } from '../types'
-import { ELEMENTS, INITIAL_DUEL, acceptSnapshot, applyIntent, isElement, seat } from './game'
+import type { Action, Conn, Duel, Element, LogLine, Peer, Player } from '../types'
+import { ACTIONS, ELEMENTS, INITIAL_DUEL, MAX_MANA, acceptSnapshot, applyIntent, isAction, legal, seat, summary } from './game'
 import { FRAME_MS, STAGE_PX_H, STAGE_ROWS, drawStage, encodeCells, roundMs, stageColumns, type StageView } from './scene'
 import {
   PING_MS,
@@ -21,12 +21,23 @@ import {
 
 const PANE = 'pairplay'
 const ICON: Record<Element, string> = { fire: '🔥', water: '💧', nature: '🌿' }
+// The pane's buttons: a row of moves, a row of spells, each with its hotkey.
+const MOVES: { action: Action; label: string; hotkey: string }[] = [
+  { action: 'charge', label: 'charge', hotkey: 'c' },
+  { action: 'shield', label: 'shield', hotkey: 's' },
+  { action: 'drain', label: 'drain', hotkey: 'd' },
+  { action: 'heal', label: 'heal', hotkey: 'h' },
+]
+const SPELLS: { action: Action; label: string; hotkey: string }[] = [
+  ...ELEMENTS.map((el, i) => ({ action: el, label: ICON[el], hotkey: String(i + 1) })),
+  ...ELEMENTS.map((el, i) => ({ action: `${el}+` as const, label: `${ICON[el]}+`, hotkey: String(i + 4) })),
+]
 
 const room = atom({ plugin: 'pairplay', key: 'room' } as const, null, { shape: 'room-1' })
 const peers = atom({ plugin: 'pairplay', key: 'peers' } as const, {}, { shape: 'peers-1' })
 const log = atom({ plugin: 'pairplay', key: 'log' } as const, [], { shape: 'log-1' })
 const conn = atom({ plugin: 'pairplay', key: 'conn' } as const, 'off' as Conn)
-const game = atom({ plugin: 'pairplay', key: 'game' } as const, INITIAL_DUEL, { shape: 'duel-1' })
+const game = atom({ plugin: 'pairplay', key: 'game' } as const, INITIAL_DUEL, { shape: 'duel-2' })
 // Host only: the round's hidden picks, never broadcast.
 const picks = atom({ plugin: 'pairplay', key: 'picks' } as const, {})
 // Guest only: what this player cast this round, for the icon over their head.
@@ -36,7 +47,8 @@ const HELP = [
   '/coop host          create a room, share the code',
   '/coop join <code>   join the other player',
   '/coop say <text>    chat (or type in the pane)',
-  '/coop cast <el>     fire | water | nature (or 1-3 in the pane)',
+  '/coop <action>      charge | shield | drain (1 mana) | heal (2)',
+  '                    fire | water | nature (1), fire+ ... (2)',
   '/coop rematch       new duel after one is won',
   '/coop leave         leave the room',
   '/coop               open the pane',
@@ -225,6 +237,10 @@ async function hostApplyNow($: $, id: string, name: string, intent: unknown) {
 /** A round just resolved: play it. A first snapshot (joining late) is not replayed. */
 async function onDuelChange($: $, before: Duel, after: Duel) {
   if (before.seq === 0 || !after.last || after.last.round === before.last?.round) return
+  // The summary waits for the death to play out: no spoilers.
+  if (after.winner !== undefined && before.winner === undefined) {
+    $.clock.after(roundMs(after), () => void quietly(() => addLog($, 'game', summary(after))))
+  }
   anim = { t0: await $.clock.now() }
   startLoop($)
   await tick($)
@@ -243,12 +259,12 @@ function stopLoop() {
 async function stageView($: $, d: Duel): Promise<StageView> {
   const now = await $.clock.now()
   const t = anim ? now - anim.t0 : undefined
-  let myPick: Element | undefined
+  let myPick: Action | undefined
   if (d.players[me]?.picked) {
     if (await isHost($)) myPick = (await read($, picks))[me]
     else {
       const m = await read($, mine)
-      if (m?.round === d.round) myPick = m.element
+      if (m?.round === d.round) myPick = m.action
     }
   }
   return { me, now, ...(t !== undefined ? { t } : {}), ...(myPick ? { myPick } : {}) }
@@ -268,13 +284,17 @@ async function tick($: $) {
   await $.ui.blit({ requestId: PANE, key: 'stage', cells: encodeCells(drawStage(d, stageCols, view), stageCols, STAGE_PX_H) })
 }
 
-async function act($: $, intent: { kind: 'cast'; element: string } | { kind: 'rematch' }) {
+async function act($: $, intent: { kind: 'act'; action: Action } | { kind: 'rematch' }) {
   if (!(await read($, room))) return 'Not in a room.'
+  if (intent.kind === 'act') {
+    const p = (await read($, game)).players[me]
+    if (!p || !legal(p, intent.action)) return `${describe(intent)}: not allowed now`
+  }
   if (!(await isHost($))) {
-    if (intent.kind === 'cast' && isElement(intent.element)) {
-      const element = intent.element
+    if (intent.kind === 'act') {
+      const action = intent.action
       const round = (await read($, game)).round
-      await update($, mine, () => ({ round, element }))
+      await update($, mine, () => ({ round, action }))
     }
     pending = { intent, states: statesSeen, tries: 0 }
     $.clock.after(RESEND_MS, () => void quietly(() => resend($)))
@@ -283,7 +303,7 @@ async function act($: $, intent: { kind: 'cast'; element: string } | { kind: 're
   }
   const d = await hostApply($, me, myName, intent)
   if (!d) return `${describe(intent)}: not allowed now`
-  return d.last && d.last.round === d.round - 1 && intent.kind === 'cast' ? `cast ${intent.element}, round resolves…` : describe(intent)
+  return d.last && d.last.round === d.round - 1 && intent.kind === 'act' ? `${describe(intent)}, round resolves…` : describe(intent)
 }
 
 const RESEND_MS = 3000
@@ -312,8 +332,8 @@ async function resend($: $) {
   $.clock.after(RESEND_MS, () => void quietly(() => resend($)))
 }
 
-function describe(intent: { kind: string; element?: string }) {
-  return intent.kind === 'cast' ? `cast ${intent.element}` : 'rematch'
+function describe(intent: { kind: string; action?: string }) {
+  return intent.kind === 'act' ? String(intent.action) : 'rematch'
 }
 
 function nameOf(d: Duel, id: string) {
@@ -322,9 +342,22 @@ function nameOf(d: Duel, id: string) {
 
 function roundText(d: Duel) {
   if (!d.last) return ''
-  const { round, picks: p, loser } = d.last
-  const vs = Object.entries(p).map(([id, el]) => `${nameOf(d, id)} ${el}`).join(' vs ')
-  return `round ${round}: ${vs} → ${loser ? `${nameOf(d, loser)} -1` : 'tie'}`
+  const { round, picks: p, loser, dmg, stole, healed } = d.last
+  const vs = Object.entries(p).map(([id, a]) => `${nameOf(d, id)} ${a}`).join(' vs ')
+  const what = [
+    ...(loser ? [`${nameOf(d, loser)} -${dmg}${stole ? ', 1 mana stolen' : ''}`] : []),
+    ...healed.map(id => `${nameOf(d, id)} +1`),
+  ]
+  return `round ${round}: ${vs} → ${what.length ? what.join(', ') : 'no damage'}`
+}
+
+/** Mana as filled and empty pips, then the timers that lock a move. */
+function playerState(p: Player) {
+  const timers = [
+    ...(p.shieldLocked ? ['shield locked'] : []),
+    ...(p.drainCooldown > 0 ? [`drain in ${p.drainCooldown}`] : []),
+  ]
+  return ['◆'.repeat(Math.max(0, p.mana)) + '◇'.repeat(Math.max(0, MAX_MANA - p.mana)), ...timers].join(' · ')
 }
 
 async function onEnvelope($: $, id: string, env: Envelope) {
@@ -483,13 +516,18 @@ export const register: Register = (on, options) => {
         return { text: arg ? await say($, arg) : 'Nothing to say.' }
       case 'leave':
         return { text: await leave($) }
-      case 'cast':
-        if (!isElement(arg.toLowerCase())) return { text: 'Cast what? fire, water or nature.' }
-        return { text: await act($, { kind: 'cast', element: arg.toLowerCase() }) }
+      case 'cast': {
+        const action = arg.toLowerCase()
+        if (!isAction(action)) return { text: `Cast what? ${ACTIONS.join(', ')}.` }
+        return { text: await act($, { kind: 'act', action }) }
+      }
       case 'rematch':
         return { text: await act($, { kind: 'rematch' }) }
-      default:
+      default: {
+        const action = verb.toLowerCase()
+        if (isAction(action)) return { text: await act($, { kind: 'act', action }) }
         return { text: HELP }
+      }
     }
   })
 
@@ -532,40 +570,42 @@ export const register: Register = (on, options) => {
                 cells={encodeCells(drawStage(g, stageCols, view), stageCols, STAGE_PX_H)}
               />
             )}
-            {Raster ? (
-              <Text>
-                {Object.entries(g.players).map(([id, p], i) => (
-                  <Text>
-                    {i > 0 ? '   ' : ''}
-                    <Text color={color(id)} bold>{id === me ? `${p.name} (you)` : p.name}</Text>{' '}
-                    <Text dimColor>{playing || g.winner ? '' : p.picked ? '✦' : '…'}</Text>
-                  </Text>
-                ))}
-              </Text>
-            ) : (
-              Object.entries(g.players).map(([id, p]) => (
+            {Object.entries(g.players).map(([id, p]) =>
+              Raster ? (
+                <Text>
+                  <Text color={color(id)} bold>{id === me ? `${p.name} (you)` : p.name}</Text>{' '}
+                  <Text dimColor>{playing || g.winner ? '' : p.picked ? '✦ ' : '… '}</Text>
+                  {playerState(p)}
+                </Text>
+              ) : (
                 <Text>
                   {id === me ? 'you' : p.name}: {'♥'.repeat(Math.max(0, p.life))}
-                  {'♡'.repeat(Math.max(0, 3 - p.life))}{' '}
+                  {'♡'.repeat(Math.max(0, 3 - p.life))} {playerState(p)}{' '}
                   <Text dimColor>{p.picked ? 'picked' : g.winner ? '' : 'thinking…'}</Text>
                 </Text>
-              ))
+              ),
             )}
             {g.last && !playing && <Text dimColor>{roundText(g)}</Text>}
-            <Box flexDirection="row" gap={1}>
-              {g.winner ? (
-                <Button key="rematch" label="⚔ rematch" hotkey="r" onPress={() => void act($, { kind: 'rematch' })} />
-              ) : (
-                ELEMENTS.map((el, i) => (
-                  <Button
-                    key={el}
-                    label={ICON[el]}
-                    hotkey={String(i + 1)}
-                    onPress={() => void act($, { kind: 'cast', element: el })}
-                  />
-                ))
-              )}
-            </Box>
+            {g.winner ? (
+              <Button key="rematch" label="⚔ rematch" hotkey="r" onPress={() => void act($, { kind: 'rematch' })} />
+            ) : (
+              [MOVES, SPELLS].map(row => (
+                <Box flexDirection="row" gap={1}>
+                  {row.map(b => {
+                    const p = g.players[me]
+                    return (
+                      <Button
+                        key={b.action}
+                        label={b.label}
+                        hotkey={b.hotkey}
+                        dimColor={!p || !legal(p, b.action)}
+                        onPress={() => void act($, { kind: 'act', action: b.action })}
+                      />
+                    )
+                  })}
+                </Box>
+              ))
+            )}
           </Box>
         )}
         <Box flexDirection="column" marginTop={1}>

@@ -76,6 +76,17 @@ test('join rejects a malformed code', async ($, on) => {
   expect(res.text).toMatch(/Bad room code/)
 })
 
+/** A seated player as the host broadcasts it. */
+const P = (name: string, over: object = {}) => ({
+  name,
+  life: 3,
+  mana: 1,
+  picked: false,
+  shieldLocked: false,
+  drainCooldown: 0,
+  ...over,
+})
+
 const ntfy = (id: string, env: object) =>
   JSON.stringify({ event: 'message', id, message: JSON.stringify({ v: 1, ...env }) }) + '\n'
 
@@ -123,7 +134,7 @@ const state = (posts: { type: string; payload?: unknown }[]) =>
 test('host: seats guest, hides first pick, resolves on second', async ($, on) => {
   const posts = harness(on, [
     ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
-    ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'cast', element: 'fire' } }),
+    ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'act', action: 'fire' } }),
   ])
   const { blits, clock } = posts
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -131,7 +142,7 @@ test('host: seats guest, hides first pick, resolves on second', async ($, on) =>
   await new Promise(r => setTimeout(r, 50))
 
   const hidden = state(posts)!
-  expect(hidden.players.peer).toEqual({ name: 'caren', life: 3, picked: true })
+  expect(hidden.players.peer).toEqual(P('caren', { picked: true }))
   expect(JSON.stringify(posts)).not.toContain('"fire"')
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -143,7 +154,7 @@ test('host: seats guest, hides first pick, resolves on second', async ($, on) =>
   expect(await ui.find({ type: 'Text', text: /→/ })).toBeUndefined()
   const after = state(posts)!
   expect(after.players.peer.life).toBe(2)
-  expect(after.last).toEqual({ round: 1, picks: { peer: 'fire', 'my-session': 'water' }, loser: 'peer' })
+  expect(after.last).toEqual({ round: 1, picks: { peer: 'fire', 'my-session': 'water' }, loser: 'peer', dmg: 1, stole: false, healed: [] })
 
   await clock.advance(3000)
   await ui.unmount()
@@ -158,29 +169,34 @@ test('guest: cast sends intent only; host snapshot is what shows', async ($, on)
     seq: 5,
     round: 2,
     players: {
-      host: { name: 'dani', life: 3, picked: true },
-      'my-session': { name: 'alice', life: 2, picked: false },
+      host: P('dani', { picked: true }),
+      'my-session': P('alice', { life: 2 }),
     },
   }
   const posts = harness(on, [
     ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel }),
     ntfy('m2', { from: 'host', name: 'dani', type: 'state', payload: { ...duel, seq: 1 } }),
-    ntfy('m3', { from: 'host', name: 'dani', type: 'intent', payload: { kind: 'cast', element: 'fire' } }),
+    ntfy('m3', { from: 'host', name: 'dani', type: 'intent', payload: { kind: 'act', action: 'fire' } }),
   ])
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
   await new Promise(r => setTimeout(r, 50))
 
-  expect((await $.command.run({ command: 'coop', args: 'cast lava' })).text).toMatch(/fire, water or nature/)
+  expect((await $.command.run({ command: 'coop', args: 'cast lava' })).text).toMatch(/charge, shield/)
+  // Not enough mana: refused before it goes out.
+  expect((await $.command.run({ command: 'coop', args: 'cast nature+' })).text).toMatch(/not allowed/)
   await $.command.run({ command: 'coop', args: 'cast nature' })
-  expect(posts.find(p => p.type === 'intent')?.payload).toEqual({ kind: 'cast', element: 'nature' })
+  expect(posts.find(p => p.type === 'intent')?.payload).toEqual({ kind: 'act', action: 'nature' })
   expect(posts.some(p => p.type === 'state')).toBe(false)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /round 2/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /dani.*✦/ })).toBeDefined()
   await ui.press({ key: 'fire' })
-  expect(posts.filter(p => p.type === 'intent').at(-1)?.payload).toEqual({ kind: 'cast', element: 'fire' })
+  expect(posts.filter(p => p.type === 'intent').at(-1)?.payload).toEqual({ kind: 'act', action: 'fire' })
+  // A bare action verb works as well.
+  await $.command.run({ command: 'coop', args: 'charge' })
+  expect(posts.filter(p => p.type === 'intent').at(-1)?.payload).toEqual({ kind: 'act', action: 'charge' })
   await ui.unmount()
 })
 
@@ -189,8 +205,8 @@ test('guest: own pick shows as its icon on the stage', async ($, on) => {
     seq: 5,
     round: 2,
     players: {
-      host: { name: 'dani', life: 3, picked: false },
-      'my-session': { name: 'alice', life: 3, picked: true },
+      host: P('dani'),
+      'my-session': P('alice', { picked: true }),
     },
   }
   harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
@@ -209,13 +225,68 @@ test('guest: own pick shows as its icon on the stage', async ($, on) => {
   await ui.unmount()
 })
 
+test('guest: pane shows mana and timers, greys out what is not allowed', async ($, on) => {
+  const duel = {
+    seq: 5,
+    round: 4,
+    players: {
+      host: P('dani', { mana: 3 }),
+      'my-session': P('alice', { life: 2, mana: 1, shieldLocked: true, drainCooldown: 2 }),
+    },
+  }
+  const posts = harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /alice.*◆◇◇.*shield locked.*drain in 2/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /dani.*◆◆◆/ })).toBeDefined()
+  const dim = async (key: string) => (await ui.find({ type: 'Button', key }))?.props.dimColor === true
+  expect(await dim('charge')).toBe(false)
+  expect(await dim('fire')).toBe(false)
+  expect(await dim('shield')).toBe(true)
+  expect(await dim('drain')).toBe(true)
+  expect(await dim('fire+')).toBe(true)
+  expect(await dim('heal')).toBe(true)
+  await ui.press({ key: 'shield' })
+  expect(posts.some(p => p.type === 'intent')).toBe(false)
+  await ui.unmount()
+})
+
+test('guest: game over logs the game summary', async ($, on) => {
+  const duel = { seq: 5, round: 3, players: { host: P('dani'), 'my-session': P('alice', { life: 1 }) } }
+  const over = {
+    ...duel,
+    seq: 6,
+    round: 4,
+    players: { host: P('dani', { mana: 0 }), 'my-session': P('alice', { life: 0 }) },
+    last: { round: 3, picks: { host: 'fire', 'my-session': 'charge' }, loser: 'my-session', dmg: 1, stole: false, healed: [] },
+    winner: 'host',
+    tally: { fire: 3, charge: 3 },
+  }
+  const { clock: clock } = harness(on, [
+    ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel }),
+    ntfy('m2', { from: 'host', name: 'dani', type: 'state', payload: over }),
+  ])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // Not before the death has played: no spoilers.
+  expect(await ui.find({ type: 'Text', text: /won in/ })).toBeUndefined()
+  await clock.advance(6000)
+  expect(await ui.find({ type: 'Text', text: /dani won in 3 rounds · fire 3 \(50%\) ⚠, charge 3 \(50%\) ⚠/ })).toBeDefined()
+  await ui.unmount()
+})
+
 const states = (posts: { type: string; payload?: unknown }[]) => posts.filter(p => p.type === 'state')
 const settle = () => new Promise(r => setTimeout(r, 50))
 
 test('host: answers even a rejected intent with its state', async ($, on) => {
   const posts = harness(on, [
     ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
-    ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'cast', element: 'lava' } }),
+    ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'act', action: 'lava' } }),
   ])
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'coop', args: 'host' })
@@ -263,7 +334,7 @@ test('send: retries until the relay takes it', async ($, on) => {
 })
 
 test('guest: resends a cast nobody answered, stops once answered', async ($, on) => {
-  const duel = { seq: 5, round: 1, players: { host: { name: 'dani', life: 3, picked: false }, 'my-session': { name: 'alice', life: 3, picked: false } } }
+  const duel = { seq: 5, round: 1, players: { host: P('dani'), 'my-session': P('alice') } }
   const posts = harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
@@ -285,7 +356,7 @@ test('host: own cast and a guest intent at the same moment both count', async ($
     on,
     [
       ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
-      ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'cast', element: 'fire' } }),
+      ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'act', action: 'fire' } }),
     ],
     { gate },
   )

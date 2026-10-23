@@ -3,7 +3,8 @@
 // round in duel.last `view.t` ms into its animation. Host left, guest right, on
 // both screens; every random thing is seeded by the round, so both play alike.
 
-import type { Duel, Element } from '../types'
+import type { Action, Duel, Element } from '../types'
+import { elementOf, isEmpowered, MAX_MANA } from './game'
 
 export const STAGE_ROWS = 14
 export const STAGE_PX_H = STAGE_ROWS * 2
@@ -38,6 +39,13 @@ export const COLORS = {
   icon: { fire: 0xff8c1f, water: 0x5cc8ff, nature: 0x7ad65a } satisfies Record<Element, number>,
   iconShade: { fire: 0xffe066, water: 0xffffff, nature: 0x3f8f2f } satisfies Record<Element, number>,
   rune: 0xc58cff,
+  mana: 0x3de0f0,
+  manaEmpty: 0x26304a,
+  shield: 0xa8f4ff,
+  shieldEdge: 0x4a9ad0,
+  drain: [0xffd6ff, 0xd070ff, 0x9a30d8, 0x5a1590],
+  healSpark: 0x9dffb0,
+  pickIcon: { charge: 0xffe94a, shield: 0x8ad8ff, drain: 0xb85cff, heal: 0x5cff8a },
   runeGlow: 0x5a3a8a,
   orbPicked: 0xffffff,
   heart: 0xe8334a,
@@ -106,6 +114,13 @@ const ICONS: Record<Element, string[]> = {
   nature: ['...aa', '..aaa', '.aaba', 'aaba.', 'ab...', 'b....'],
 }
 const RUNE = ['XXX', '..X', '.XX', '...', '.X.']
+// The viewer's own non-spell pick, over their head like an element icon.
+const PICK_ICONS: Record<Move, string[]> = {
+  charge: ['..XX', '.XX.', 'XXXX', '.XX.', 'XX..'],
+  shield: ['XXXXX', 'X...X', 'X...X', '.X.X.', '..X..'],
+  drain: ['X...X', 'XX.XX', '.XXX.', '..X..'],
+  heal: ['..X..', '..X..', 'XXXXX', '..X..', '..X..'],
+}
 const HEART = ['X.X', 'XXX', '.X.']
 const GLYPHS: Record<string, string[]> = {
   K: ['X.X', 'X.X', 'XX.', 'X.X', 'X.X'],
@@ -113,13 +128,15 @@ const GLYPHS: Record<string, string[]> = {
   '!': ['X', 'X', 'X', '.', 'X'],
   '-': ['...', '...', 'XXX', '...', '...'],
   '1': ['.X.', 'XX.', '.X.', '.X.', 'XXX'],
+  '2': ['XXX', '..X', 'XXX', 'X..', 'XXX'],
+  '+': ['...', '.X.', 'XXX', '.X.', '...'],
 }
 
 export type StageView = {
   /** The viewer's player id: whose pick may be shown as an icon. */
   me?: string
   /** The viewer's own pick this round, when they have cast. */
-  myPick?: Element
+  myPick?: Action
   /** Clock time, ms: drives the idle loop (stars, blinks, victory hops). */
   now: number
   /** Ms into the round animation of duel.last; absent when idle. */
@@ -142,6 +159,24 @@ export function roundMs(duel: Duel) {
 type Canvas = { w: number; px: Uint32Array; ox: number; oy: number }
 type Pt = { x: number; y: number }
 type Side = 'host' | 'guest'
+type Move = 'charge' | 'shield' | 'drain' | 'heal'
+/** What flies across the stage: an element, a drain, or nothing. */
+type Shot = Element | 'drain'
+
+function shotOf(a: Action): Shot | null {
+  return elementOf(a) ?? (a === 'drain' ? 'drain' : null)
+}
+
+function palette(shot: Shot): readonly number[] {
+  return shot === 'drain' ? COLORS.drain : COLORS.spell[shot]
+}
+
+/** The staff orb's color while a round charges up. */
+function orbColor(a: Action) {
+  const shot = shotOf(a)
+  if (shot) return palette(shot)[1]!
+  return a === 'charge' ? COLORS.mana : a === 'shield' ? COLORS.shield : COLORS.healSpark
+}
 
 function put(c: Canvas, x: number, y: number, color: number) {
   x = Math.round(x + c.ox)
@@ -350,6 +385,50 @@ function icon(c: Canvas, el: Element, x0: number, y0: number) {
   )
 }
 
+function pickIcon(c: Canvas, a: Action, x0: number, y0: number) {
+  const el = elementOf(a)
+  if (el) return icon(c, el, x0, y0)
+  glyphs(c, PICK_ICONS[a as Move], x0, y0, COLORS.pickIcon[a as Move])
+}
+
+/** Mana crystals set in the ground below a wizard, lit for each mana held. */
+function crystals(c: Canvas, cx: number, mana: number) {
+  for (let i = 0; i < MAX_MANA; i++) {
+    const color = i < mana ? COLORS.mana : COLORS.manaEmpty
+    for (let y = 0; y < 2; y++) for (let x = 0; x < 2; x++) put(c, cx - 6 + i * 4 + x, GROUND_Y + 1 + y, color)
+  }
+}
+
+/** A curved wall of light in front of a wizard. */
+function shieldWall(c: Canvas, x: number, dir: number, k: number, t: number) {
+  const top = SPRITE_TOP - 1
+  const h = GROUND_Y - top
+  for (let s = 0; s < h * Math.min(1, k * 3); s++) {
+    const v = (s / h) * 2 - 1
+    const bulge = Math.sqrt(Math.max(0, 1 - v * v)) * 2
+    const shimmer = (s + Math.floor(t / 90)) % 5 === 0
+    put(c, x + dir * bulge, top + s, shimmer ? 0xffffff : COLORS.shield)
+    put(c, x + dir * (bulge - 1), top + s, COLORS.shieldEdge)
+  }
+}
+
+/** Mana motes spiralling in on a charging wizard. */
+function manaSparks(c: Canvas, at: Pt, k: number, t: number) {
+  for (let i = 0; i < 10; i++) {
+    const ang = i * 0.63 + t * 0.01
+    const r = lerp(10, 2, (k + (i % 3) * 0.15) % 1)
+    put(c, at.x + Math.cos(ang) * r, at.y + Math.sin(ang) * r * 0.7, COLORS.mana)
+  }
+}
+
+/** Green motes rising off a wizard who heals. */
+function healSparks(c: Canvas, at: Pt, k: number, seed: number) {
+  for (let i = 0; i < 12; i++) {
+    const p = (k * 1.5 + rnd(seed, i, 91)) % 1
+    put(c, at.x + (rnd(seed, i, 92) - 0.5) * 10, GROUND_Y - 1 - p * 16, p > 0.8 ? COLORS.heart : COLORS.healSpark)
+  }
+}
+
 function rune(c: Canvas, x0: number, y0: number, now: number) {
   if (Math.sin(now / 250) > 0) {
     for (let y = -1; y <= 5; y++) for (let x = -1; x <= 3; x++) put(c, x0 + x, y0 + y, COLORS.runeGlow)
@@ -445,12 +524,24 @@ function vine(c: Canvas, fromX: number, toX: number, t: number, seed: number) {
   put(c, toX + dir, GROUND_Y - 3, COLORS.thorn)
 }
 
-/** One spell in flight, its head at `head`; `from` is where it left the caster. */
-function travel(c: Canvas, el: Element, from: Pt, head: Pt, t: number, seed: number) {
+/** One spell in flight, its head at `head`; `from` is where it left the caster. Empowered ones blaze. */
+function travel(c: Canvas, shot: Shot, from: Pt, head: Pt, t: number, seed: number, big = false) {
   const dir = Math.sign(head.x - from.x) || 1
-  if (el === 'fire') fireball(c, head, dir, t, seed)
-  else if (el === 'water') torrent(c, from, head, t, seed)
-  else vine(c, from.x, head.x, t, seed)
+  const pal = palette(shot)
+  if (big) blob(c, head.x, head.y, 4.5 + Math.sin(t / 60) * 0.4, d => pal[d < 0.7 ? 2 : 3]!)
+  if (shot === 'fire') fireball(c, head, dir, t, seed, big ? 3.2 : 2.6)
+  else if (shot === 'water') torrent(c, from, head, t, seed)
+  else if (shot === 'nature') vine(c, from.x, head.x, t, seed)
+  else {
+    for (let i = 1; i < 8; i++) put(c, head.x - dir * i, head.y + Math.sin(i + t / 70), pal[i % 2 ? 2 : 3]!)
+    blob(c, head.x, head.y, 2.2, d => pal[d < 0.4 ? 0 : 1]!)
+  }
+}
+
+/** A charging staff, by what it is about to cast. */
+function windUp(c: Canvas, shot: Shot, tip: Pt, body: Pt, k: number, t: number, seed: number) {
+  if (shot !== 'drain') return charge(c, shot, tip, body, k, t, seed)
+  blob(c, tip.x, tip.y, 0.8 + k * 1.4, d => COLORS.drain[d < 0.5 ? 0 : 1]!)
 }
 
 function burst(c: Canvas, at: Pt, k: number, pals: (readonly number[])[], seed: number) {
@@ -469,7 +560,9 @@ function burst(c: Canvas, at: Pt, k: number, pals: (readonly number[])[], seed: 
   }
 }
 
-function impact(c: Canvas, el: Element, at: Pt, k: number, t: number, seed: number) {
+function impact(c: Canvas, shot: Shot, at: Pt, k: number, t: number, seed: number) {
+  if (shot === 'drain') return burst(c, at, k, [COLORS.drain], seed)
+  const el = shot
   const pal = COLORS.spell[el]
   if (el === 'fire') {
     if (k < 0.5) blob(c, at.x, at.y, 2 + k * 9, d => pick(pal, d * (0.5 + k)))
@@ -583,6 +676,19 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
   const seed = (last?.round ?? duel.round) * 7919
   const playing = t !== undefined && last !== undefined
   const loser = sideOf(last?.loser)
+  const action = (side: Side) => last!.picks[id[side]!]!
+  const shot = (side: Side) => shotOf(action(side))
+  const shooters = playing && id.host && id.guest ? (['host', 'guest'] as const).filter(side => shot(side)) : []
+  const clash = shooters.length === 2
+  const healed = (side: Side) => playing && !!id[side] && last.healed.includes(id[side]!)
+  /** Life as the round shows it at `t`: a hit lands at PUSH_END, a heal at CLASH_END. */
+  const shownLife = (side: Side) => {
+    const life = duel.players[id[side]!]!.life
+    if (!playing) return life
+    if (side === loser && t < PUSH_END) return life + last.dmg
+    if (healed(side) && t < CLASH_END) return life - 1
+    return life
+  }
   const winnerSide = sideOf(duel.winner)
   const deadSide = winnerSide ? other(winnerSide) : null
   const lethal = playing && deadSide !== null && loser === deadSide
@@ -590,11 +696,12 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
   const tt = playing ? t : deadSide ? DEATH_END : undefined
   const clock = playing ? t : view.now
 
-  const flash = playing && t >= TRAVEL_END && t < TRAVEL_END + 100 ? 0.45 : 0
+  const flash = playing && clash && t >= TRAVEL_END && t < TRAVEL_END + 100 ? 0.45 : 0
   backdrop(c, view.now, flash)
   if (!playing && !deadSide) fireflies(c, view.now)
+  for (const side of ['host', 'guest'] as const) if (id[side]) crystals(c, body(side).x, duel.players[id[side]!]!.mana)
 
-  const shaking = playing && ((t >= TRAVEL_END && t < CLASH_END) || (loser && t >= PUSH_END && t < PUSH_END + 260))
+  const shaking = playing && ((clash && t >= TRAVEL_END && t < CLASH_END) || (loser && t >= PUSH_END && t < PUSH_END + 260))
   const shake = () => {
     if (shaking) {
       c.ox = Math.floor(t! / 50) % 2 ? 1 : -1
@@ -618,7 +725,7 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
   for (const side of ['host', 'guest'] as const) {
     const pid = id[side]
     if (!pid) continue
-    const lost = 3 - duel.players[pid]!.life - (playing && side === loser && t < PUSH_END ? 1 : 0)
+    const lost = 3 - shownLife(side)
     for (let i = 0; i < lost * 3; i++) put(c, body(side).x + (rnd(seed, side === 'host' ? 1 : 2, i) - 0.5) * 9, GROUND_Y, COLORS.blood[i % 2 ? 0 : 3]!)
   }
 
@@ -628,15 +735,11 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
     if (!pid) continue
     const p = duel.players[pid]!
     const hitDone = playing && side === loser && t >= PUSH_END
-    const life = playing && side === loser && !hitDone ? p.life + 1 : p.life
-    still()
-    hearts(c, xs[side], life)
-    shake()
 
     const blink = (clock + (side === 'host' ? 0 : 1400)) % 3300 < 130
     const flicker = rnd(seed, side === 'host' ? 3 : 4, Math.floor(clock / 200)) > 0.7
     let orb: number = p.picked ? COLORS.orbPicked : flicker ? mix(COLORS[side].O, 0xffffff, 0.5) : COLORS[side].O
-    if (playing && t < CHARGE_END) orb = COLORS.spell[last.picks[pid]!]![1]!
+    if (playing && t < CHARGE_END) orb = orbColor(last.picks[pid]!)
     const victorious = side === winnerSide && tt !== undefined && tt >= VICTORY_AT
     const hop = victorious && Math.floor(clock / 350) % 2 === 0 ? -1 : 0
     const tint = hitDone && t < PUSH_END + 300 && Math.floor(t / 66) % 2 === 0 ? COLORS.hit : undefined
@@ -665,63 +768,107 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
       still()
       const ix = side === 'host' ? xs.host + 2 : xs.guest + 4
       const bob = Math.sin(view.now / 300) > 0 ? 0 : 1
-      if (pid === view.me && view.myPick) icon(c, view.myPick, ix, 3 + bob)
+      if (pid === view.me && view.myPick) pickIcon(c, view.myPick, ix, 3 + bob)
       else rune(c, ix + 1, 3 + bob, view.now)
       shake()
     }
   }
 
   if (playing && id.host && id.guest) {
-    const el = (side: Side) => last.picks[id[side]!]!
     const midX = width / 2
     const midY = SPRITE_TOP + 6
-    const start = (side: Side): Pt => (el(side) === 'nature' ? { x: body(side).x + dirOf(side) * 6, y: GROUND_Y - 1 } : tips[side])
-    const meet = (side: Side): Pt => (el(side) === 'nature' ? { x: midX - dirOf(side), y: GROUND_Y - 1 } : { x: midX - dirOf(side) * 2, y: midY })
-    if (t < CHARGE_END) {
-      for (const side of ['host', 'guest'] as const) charge(c, el(side), tips[side], body(side), t / CHARGE_END, t, seed)
-    } else if (t < TRAVEL_END) {
-      const k = phase(t, CHARGE_END, TRAVEL_END)
-      for (const side of ['host', 'guest'] as const) {
-        const from = start(side)
-        const to = meet(side)
-        const arc = el(side) === 'nature' ? 0 : Math.sin(k * Math.PI) * 3
-        travel(c, el(side), from, { x: lerp(from.x, to.x, k), y: lerp(from.y, to.y, k) - arc }, t, seed + (side === 'host' ? 10 : 20))
+    const start = (side: Side): Pt => (shot(side) === 'nature' ? { x: body(side).x + dirOf(side) * 6, y: GROUND_Y - 1 } : tips[side])
+    const meet = (side: Side): Pt => (shot(side) === 'nature' ? { x: midX - dirOf(side), y: GROUND_Y - 1 } : { x: midX - dirOf(side) * 2, y: midY })
+    const aimAt = (win: Side, side: Side): Pt => (shot(win) === 'nature' ? { x: body(side).x, y: GROUND_Y - 1 } : body(side))
+    const wallX = (side: Side) => body(side).x + dirOf(side) * 8
+    const fly = (side: Side, from: Pt, head: Pt, s: number) => travel(c, shot(side)!, from, head, t, s, isEmpowered(action(side)))
+
+    // What each wizard does for themselves: charge up, raise a shield, heal.
+    for (const side of ['host', 'guest'] as const) {
+      const a = action(side)
+      if (a === 'charge' && t < CLASH_END) manaSparks(c, body(side), phase(t, 0, CLASH_END), t)
+      if (a === 'shield' && t >= CHARGE_END / 2) shieldWall(c, wallX(side), dirOf(side), phase(t, CHARGE_END / 2, CHARGE_END * 2), t)
+      if (healed(side) && t >= CHARGE_END && t < TIE_END) {
+        healSparks(c, body(side), phase(t, CHARGE_END, TIE_END), seed + (side === 'host' ? 5 : 6))
+        if (t >= CLASH_END) {
+          still()
+          text(c, '+1', body(side).x - 3, SPRITE_TOP - 2 - phase(t, CLASH_END, TIE_END) * 6, COLORS.healSpark, null)
+          shake()
+        }
       }
-    } else if (t < CLASH_END) {
-      const k = phase(t, TRAVEL_END, CLASH_END)
-      for (const side of ['host', 'guest'] as const) if (el(side) === 'water' && k < 0.4) torrent(c, start(side), meet(side), t, seed)
-      burst(c, { x: midX, y: midY }, k, [COLORS.spell[el('host')], COLORS.spell[el('guest')]], seed)
-    } else if (!loser) {
-      const k = phase(t, CLASH_END, TIE_END)
-      for (let i = 0; i < 16; i++) {
-        const ang = (i / 16) * Math.PI * 2
-        const pal = COLORS.spell[el(i % 2 ? 'host' : 'guest')]
-        const color = k > 0.7 ? COLORS.smoke[i % 2]! : pal[2]!
-        put(c, midX + Math.cos(ang) * lerp(6, 14, k), midY + Math.sin(ang) * lerp(3, 7, k) + k * k * 4, color)
-      }
-    } else {
-      const win = other(loser)
-      const target = el(win) === 'nature' ? { x: body(loser).x, y: GROUND_Y - 1 } : body(loser)
-      if (t < PUSH_END) {
-        const k = phase(t, CLASH_END, PUSH_END)
-        const from = el(win) === 'water' ? start(win) : meet(win)
-        const head = { x: lerp(meet(win).x, target.x, k), y: lerp(meet(win).y, target.y, k) }
-        travel(c, el(win), from, head, t, seed + 30)
-      } else if (t < IMPACT_END) {
+    }
+
+    /** The winning shot lands on `side`: impact, damage, blood, and a stolen mana flying home. */
+    const land = (win: Side, side: Side) => {
+      const target = aimAt(win, side)
+      if (t >= PUSH_END && t < IMPACT_END) {
         const k = phase(t, PUSH_END, IMPACT_END)
-        impact(c, el(win), target, k, t, seed + 40)
+        impact(c, shot(win)!, target, k, t, seed + 40)
+        if (last.stole) blob(c, lerp(body(side).x, body(win).x, k), body(side).y - Math.sin(k * Math.PI) * 6, 1.4, () => COLORS.mana)
         still()
-        text(c, '-1', body(loser).x - 3, SPRITE_TOP - 2 - k * 6, COLORS.dmg, null)
+        text(c, `-${last.dmg}`, body(side).x - 3, SPRITE_TOP - 2 - k * 6, COLORS.dmg, null)
         shake()
       }
       // Even a graze bleeds.
       if (t >= PUSH_END) {
-        gush(c, { from: body(loser), start: PUSH_END, spread: 0.06, count: 24, every: 8, seed: seed + 2 }, Math.min(t, IMPACT_END))
+        gush(c, { from: body(side), start: PUSH_END, spread: 0.06, count: 12 * last.dmg + 12, every: 8, seed: seed + 2 }, Math.min(t, IMPACT_END))
       }
+    }
+
+    if (t < CHARGE_END) {
+      for (const side of shooters) windUp(c, shot(side)!, tips[side], body(side), t / CHARGE_END, t, seed)
+    } else if (clash) {
+      if (t < TRAVEL_END) {
+        const k = phase(t, CHARGE_END, TRAVEL_END)
+        for (const side of shooters) {
+          const from = start(side)
+          const to = meet(side)
+          const arc = shot(side) === 'nature' ? 0 : Math.sin(k * Math.PI) * 3
+          fly(side, from, { x: lerp(from.x, to.x, k), y: lerp(from.y, to.y, k) - arc }, seed + (side === 'host' ? 10 : 20))
+        }
+      } else if (t < CLASH_END) {
+        const k = phase(t, TRAVEL_END, CLASH_END)
+        for (const side of shooters) if (shot(side) === 'water' && k < 0.4) torrent(c, start(side), meet(side), t, seed)
+        burst(c, { x: midX, y: midY }, k, [palette(shot('host')!), palette(shot('guest')!)], seed)
+      } else if (!loser) {
+        const k = phase(t, CLASH_END, TIE_END)
+        for (let i = 0; i < 16; i++) {
+          const ang = (i / 16) * Math.PI * 2
+          const pal = palette(shot(i % 2 ? 'host' : 'guest')!)
+          const color = k > 0.7 ? COLORS.smoke[i % 2]! : pal[2]!
+          put(c, midX + Math.cos(ang) * lerp(6, 14, k), midY + Math.sin(ang) * lerp(3, 7, k) + k * k * 4, color)
+        }
+      } else {
+        const win = other(loser)
+        if (t < PUSH_END) {
+          const k = phase(t, CLASH_END, PUSH_END)
+          const target = aimAt(win, loser)
+          const from = shot(win) === 'water' ? start(win) : meet(win)
+          fly(win, from, { x: lerp(meet(win).x, target.x, k), y: lerp(meet(win).y, target.y, k) }, seed + 30)
+        }
+        land(win, loser)
+      }
+    } else if (shooters.length === 1) {
+      // Nothing to clash with: the shot flies the whole way, to a shield or a body.
+      const win = shooters[0]!
+      const side = other(win)
+      const blocked = action(side) === 'shield'
+      const from = start(win)
+      const end = blocked ? { x: wallX(side), y: shot(win) === 'nature' ? GROUND_Y - 1 : midY } : aimAt(win, side)
+      if (t < PUSH_END) {
+        const k = phase(t, CHARGE_END, PUSH_END)
+        const arc = shot(win) === 'nature' ? 0 : Math.sin(k * Math.PI) * 3
+        fly(win, from, { x: lerp(from.x, end.x, k), y: lerp(from.y, end.y, k) - arc }, seed + 10)
+      } else if (blocked) {
+        burst(c, end, phase(t, PUSH_END, TIE_END), [palette(shot(win)!), [COLORS.shield, COLORS.shieldEdge]], seed)
+      }
+      if (!blocked && side === loser) land(win, side)
     }
   }
 
   still()
+  // The HUD, over every effect.
+  for (const side of ['host', 'guest'] as const) if (id[side]) hearts(c, xs[side], shownLife(side))
   if (deadSide && tt !== undefined && tt >= IMPACT_END + 300) {
     lensSplats(c, phase(tt, IMPACT_END + 300, DEATH_END - 600), view.now, seed + 3)
   }
