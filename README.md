@@ -29,6 +29,12 @@ Needs `curl` on the PATH (it holds the live connection to the relay).
 | `/coop host` → room code shown and copied | |
 | send the code to player 2 | `/coop join ABCD-EFGH` |
 | chat: type in the pane, or `/coop say hi` | same |
+| duel: `/coop cast fire` (or the pane buttons, 1-3) | `/coop cast water` |
+
+Mage duel: water beats fire, fire beats nature, nature beats water. Both pick in
+secret; when both have picked the round resolves and the loser loses one of 3
+lives. At 0 the other player wins; `/coop rematch` starts over. The host's
+session is the referee: it holds the picks and decides every round.
 
 `/coop` opens the pane, `/coop leave` leaves the room. The status line shows
 the room and how many peers are connected.

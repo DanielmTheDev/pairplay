@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Conn, LogLine, Peer } from '../types'
-import { INITIAL_GAME, acceptSnapshot, applyIntent } from './game'
+import type { Conn, Duel, LogLine, Peer } from '../types'
+import { ELEMENTS, INITIAL_DUEL, acceptSnapshot, applyIntent, isElement, seat } from './game'
 import {
   PING_MS,
   PROTOCOL,
@@ -22,13 +22,16 @@ const room = atom({ plugin: 'pairplay', key: 'room' } as const, null, { shape: '
 const peers = atom({ plugin: 'pairplay', key: 'peers' } as const, {}, { shape: 'peers-1' })
 const log = atom({ plugin: 'pairplay', key: 'log' } as const, [], { shape: 'log-1' })
 const conn = atom({ plugin: 'pairplay', key: 'conn' } as const, 'off' as Conn)
-const game = atom({ plugin: 'pairplay', key: 'game' } as const, INITIAL_GAME, { shape: 'game-1' })
+const game = atom({ plugin: 'pairplay', key: 'game' } as const, INITIAL_DUEL, { shape: 'duel-1' })
+// Host only: the round's hidden picks, never broadcast.
+const picks = atom({ plugin: 'pairplay', key: 'picks' } as const, {})
 
 const HELP = [
   '/coop host          create a room, share the code',
   '/coop join <code>   join the other player',
   '/coop say <text>    chat (or type in the pane)',
-  '/coop poke          bump your count (host decides)',
+  '/coop cast <el>     fire | water | nature (or 1-3 in the pane)',
+  '/coop rematch       new duel after one is won',
   '/coop leave         leave the room',
   '/coop               open the pane',
 ].join('\n')
@@ -95,7 +98,7 @@ async function handle($: $, env: Envelope) {
         $.ui.toast(`coop: ${env.name} joined`)
       }
       await send($, 'here')
-      if (await isHost($)) await send($, 'state', await read($, game))
+      if (await isHost($)) await hostSeat($, env.from, env.name)
       return
     case 'here':
     case 'ping':
@@ -121,7 +124,7 @@ async function handle($: $, env: Envelope) {
     }
     case 'intent':
       await seen($, env)
-      if (await isHost($)) await hostApply($, env.name, env.payload)
+      if (await isHost($)) await hostApply($, env.from, env.name, env.payload)
       return
     case 'state':
       await seen($, env)
@@ -134,18 +137,48 @@ async function isHost($: $) {
   return (await read($, room))?.role === 'host'
 }
 
-/** The one place state changes: on the host, then broadcast as a snapshot. */
-async function hostApply($: $, player: string, intent: unknown) {
-  let next: ReturnType<typeof applyIntent> = null
-  await update($, game, current => (next = applyIntent(current, player, intent)) ?? current)
-  if (next) await send($, 'state', next)
-  return next !== null
+/** Seats a player (both, after a reload lost nothing but a seat) and broadcasts. */
+async function hostSeat($: $, id: string, name: string) {
+  await update($, game, d => seat(d, me, myName) ?? d)
+  await update($, game, d => seat(d, id, name) ?? d)
+  await send($, 'state', await read($, game))
 }
 
-async function poke($: $) {
+/** The one place the duel changes: on the host, then broadcast as a snapshot. */
+async function hostApply($: $, id: string, name: string, intent: unknown) {
+  await update($, game, d => seat(d, me, myName) ?? d)
+  await update($, game, d => seat(d, id, name) ?? d)
+  const next = applyIntent({ duel: await read($, game), picks: await read($, picks) }, id, intent)
+  if (!next) return null
+  await update($, picks, () => next.picks)
+  await update($, game, () => next.duel)
+  await send($, 'state', next.duel)
+  return next.duel
+}
+
+async function act($: $, intent: { kind: 'cast'; element: string } | { kind: 'rematch' }) {
   if (!(await read($, room))) return 'Not in a room.'
-  if (await isHost($)) return (await hostApply($, myName, { kind: 'poke' })) ? 'poked' : 'rejected'
-  return (await send($, 'intent', { kind: 'poke' })) ? 'poke sent to host' : 'Send failed, see pane.'
+  if (!(await isHost($))) {
+    return (await send($, 'intent', intent)) ? `${describe(intent)} sent to host` : 'Send failed, see pane.'
+  }
+  const d = await hostApply($, me, myName, intent)
+  if (!d) return `${describe(intent)}: not allowed now`
+  return d.last && d.last.round === d.round - 1 && intent.kind === 'cast' ? roundText(d) : describe(intent)
+}
+
+function describe(intent: { kind: string; element?: string }) {
+  return intent.kind === 'cast' ? `cast ${intent.element}` : 'rematch'
+}
+
+function nameOf(d: Duel, id: string) {
+  return id === me ? myName : (d.players[id]?.name ?? '?')
+}
+
+function roundText(d: Duel) {
+  if (!d.last) return ''
+  const { round, picks: p, loser } = d.last
+  const vs = Object.entries(p).map(([id, el]) => `${nameOf(d, id)} ${el}`).join(' vs ')
+  return `round ${round}: ${vs} → ${loser ? `${nameOf(d, loser)} -1` : 'tie'}`
 }
 
 async function onEnvelope($: $, id: string, env: Envelope) {
@@ -223,7 +256,8 @@ async function enter($: $, code: string, role: 'host' | 'guest') {
   if (current) await send($, 'bye')
   const verb = role === 'host' ? 'hosting' : 'joined'
   await update($, room, () => ({ code, role }))
-  await update($, game, () => INITIAL_GAME)
+  await update($, game, () => (role === 'host' ? (seat(INITIAL_DUEL, me, myName) ?? INITIAL_DUEL) : INITIAL_DUEL))
+  await update($, picks, () => ({}))
   await update($, peers, () => ({}))
   await addLog($, 'you', `${verb} room ${code}`)
   await start($)
@@ -295,8 +329,11 @@ export const register: Register = (on, options) => {
         return { text: arg ? await say($, arg) : 'Nothing to say.' }
       case 'leave':
         return { text: await leave($) }
-      case 'poke':
-        return { text: await poke($) }
+      case 'cast':
+        if (!isElement(arg.toLowerCase())) return { text: 'Cast what? fire, water or nature.' }
+        return { text: await act($, { kind: 'cast', element: arg.toLowerCase() }) }
+      case 'rematch':
+        return { text: await act($, { kind: 'rematch' }) }
       default:
         return { text: HELP }
     }
@@ -304,7 +341,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
-    const { Box, Text } = els
+    const { Box, Text, Button } = els
     // Mobile draws no field: chat there via /coop say.
     const Input = 'Input' in els ? els.Input : undefined
     const r = await read($, room)
@@ -323,10 +360,34 @@ export const register: Register = (on, options) => {
           {live.length === 0 ? 'waiting for the other player…' : `with: ${live.map(([, p]) => p.name).join(', ')}`}
         </Text>
         {r && (
-          <Text>
-            state #{g.seq} · {r.role ?? 'guest'}
-            {Object.entries(g.pokes).map(([who, n]) => ` · ${who} ${n}`).join('')}
-          </Text>
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold>
+              {g.winner ? `${nameOf(g, g.winner)} wins!` : `round ${g.round}`}{' '}
+              <Text dimColor>· {r.role ?? 'guest'}</Text>
+            </Text>
+            {Object.entries(g.players).map(([id, p]) => (
+              <Text>
+                {id === me ? 'you' : p.name}: {'♥'.repeat(Math.max(0, p.life))}
+                {'♡'.repeat(Math.max(0, 3 - p.life))}{' '}
+                <Text dimColor>{p.picked ? 'picked' : g.winner ? '' : 'thinking…'}</Text>
+              </Text>
+            ))}
+            {g.last && <Text dimColor>{roundText(g)}</Text>}
+            <Box flexDirection="row" gap={1}>
+              {g.winner ? (
+                <Button key="rematch" label="rematch" hotkey="r" onPress={() => void act($, { kind: 'rematch' })} />
+              ) : (
+                ELEMENTS.map((el, i) => (
+                  <Button
+                    key={el}
+                    label={el}
+                    hotkey={String(i + 1)}
+                    onPress={() => void act($, { kind: 'cast', element: el })}
+                  />
+                ))
+              )}
+            </Box>
+          </Box>
         )}
         <Box flexDirection="column" marginTop={1}>
           {lines.length === 0 && <Text dimColor>{HELP}</Text>}

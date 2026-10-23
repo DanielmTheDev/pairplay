@@ -96,34 +96,61 @@ function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[])
   return posts
 }
 
-test('host: applies guest intent, broadcasts state; own poke too', async ($, on) => {
-  const posts = harness(on, [ntfy('m1', { from: 'peer', name: 'bob', type: 'intent', payload: { kind: 'poke' } })])
+const state = (posts: { type: string; payload?: unknown }[]) =>
+  posts.filter(p => p.type === 'state').at(-1)?.payload as Record<string, any> | undefined
+
+test('host: seats guest, hides first pick, resolves on second', async ($, on) => {
+  const posts = harness(on, [
+    ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
+    ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'cast', element: 'fire' } }),
+  ])
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'coop', args: 'host' })
   await new Promise(r => setTimeout(r, 50))
-  expect(posts.find(p => p.type === 'state')?.payload).toEqual({ seq: 1, pokes: { bob: 1 } })
 
-  await $.command.run({ command: 'coop', args: 'poke' })
-  expect(posts.filter(p => p.type === 'state').at(-1)?.payload).toEqual({ seq: 2, pokes: { bob: 1, alice: 1 } })
+  const hidden = state(posts)!
+  expect(hidden.players.peer).toEqual({ name: 'caren', life: 3, picked: true })
+  expect(JSON.stringify(posts)).not.toContain('"fire"')
+
+  const res = await $.command.run({ command: 'coop', args: 'cast water' })
+  expect(res.text).toMatch(/round 1/)
+  const after = state(posts)!
+  expect(after.players.peer.life).toBe(2)
+  expect(after.last).toEqual({ round: 1, picks: { peer: 'fire', 'my-session': 'water' }, loser: 'peer' })
+
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /state #2/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /round 1: .*caren fire.* → caren -1/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /alice water/ })).toBeDefined()
   await ui.unmount()
 })
 
-test('guest: poke sends intent only; host snapshot is what shows', async ($, on) => {
+test('guest: cast sends intent only; host snapshot is what shows', async ($, on) => {
+  const duel = {
+    seq: 5,
+    round: 2,
+    players: {
+      host: { name: 'dani', life: 3, picked: true },
+      'my-session': { name: 'alice', life: 2, picked: false },
+    },
+  }
   const posts = harness(on, [
-    ntfy('m1', { from: 'host', name: 'bob', type: 'state', payload: { seq: 4, pokes: { bob: 3, alice: 1 } } }),
-    ntfy('m2', { from: 'host', name: 'bob', type: 'state', payload: { seq: 2, pokes: { bob: 9 } } }),
-    ntfy('m3', { from: 'host', name: 'bob', type: 'intent', payload: { kind: 'poke' } }),
+    ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel }),
+    ntfy('m2', { from: 'host', name: 'dani', type: 'state', payload: { ...duel, seq: 1 } }),
+    ntfy('m3', { from: 'host', name: 'dani', type: 'intent', payload: { kind: 'cast', element: 'fire' } }),
   ])
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
   await new Promise(r => setTimeout(r, 50))
 
-  await $.command.run({ command: 'coop', args: 'poke' })
-  expect(posts.find(p => p.type === 'intent')?.payload).toEqual({ kind: 'poke' })
+  expect((await $.command.run({ command: 'coop', args: 'cast lava' })).text).toMatch(/fire, water or nature/)
+  await $.command.run({ command: 'coop', args: 'cast nature' })
+  expect(posts.find(p => p.type === 'intent')?.payload).toEqual({ kind: 'cast', element: 'nature' })
   expect(posts.some(p => p.type === 'state')).toBe(false)
+
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /state #4/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /round 2/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /dani.*picked/ })).toBeDefined()
+  await ui.press({ key: 'fire' })
+  expect(posts.filter(p => p.type === 'intent').at(-1)?.payload).toEqual({ kind: 'cast', element: 'fire' })
   await ui.unmount()
 })
