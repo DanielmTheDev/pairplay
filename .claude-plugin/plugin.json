@@ -1,0 +1,25 @@
+{
+  "name": "pairplay",
+  "version": "0.1.0",
+  "description": "Two-player co-op between Claude Code sessions: rooms, presence and chat over an ntfy relay",
+  "author": {
+    "name": "Daniel Muckelbauer"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/DanielmTheDev/pairplay",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "relayUrl": {
+      "type": "string",
+      "title": "Relay URL",
+      "description": "ntfy server both players use (self-host + tunnel if ntfy.sh rate-limits)",
+      "default": "https://ntfy.sh"
+    },
+    "playerName": {
+      "type": "string",
+      "title": "Player name",
+      "description": "Name shown to the other player; empty = $USER",
+      "default": ""
+    }
+  }
+}

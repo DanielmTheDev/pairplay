@@ -1,0 +1,6 @@
+{
+  "name": "pairplay",
+  "owner": { "name": "Daniel Muckelbauer" },
+  "metadata": { "description": "Two-player co-op games for Claude Code sessions" },
+  "plugins": [{ "name": "pairplay", "source": "./" }]
+}
