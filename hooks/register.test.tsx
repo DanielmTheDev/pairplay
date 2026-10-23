@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
   plugin: 'pairplay',
@@ -78,6 +78,12 @@ const ntfy = (id: string, env: object) =>
 
 function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[]) {
   const posts: { type: string; payload?: unknown }[] = []
+  const blits: unknown[] = []
+  on('ui.blit', (_, e) => {
+    blits.push(e)
+    return { value: {} }
+  })
+  const clock = mock.clock(on)
   on('command.register', () => ({ value: { command: 'coop' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.copy', () => ({ value: { isCopied: true } }))
@@ -93,7 +99,7 @@ function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[])
     await new Promise(() => {})
     return { code: 0, signal: null }
   })
-  return posts
+  return Object.assign(posts, { blits, clock })
 }
 
 const state = (posts: { type: string; payload?: unknown }[]) =>
@@ -104,6 +110,7 @@ test('host: seats guest, hides first pick, resolves on second', async ($, on) =>
     ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
     ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'cast', element: 'fire' } }),
   ])
+  const { blits, clock } = posts
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'coop', args: 'host' })
   await new Promise(r => setTimeout(r, 50))
@@ -112,16 +119,23 @@ test('host: seats guest, hides first pick, resolves on second', async ($, on) =>
   expect(hidden.players.peer).toEqual({ name: 'caren', life: 3, picked: true })
   expect(JSON.stringify(posts)).not.toContain('"fire"')
 
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Raster', key: 'stage' })).toBeDefined()
   const res = await $.command.run({ command: 'coop', args: 'cast water' })
-  expect(res.text).toMatch(/round 1/)
+  expect(res.text).toMatch(/round resolves/)
+  expect(blits.at(-1)).toMatchObject({ requestId: 'pairplay', key: 'stage' })
+  // The result stays hidden while the round plays.
+  expect(await ui.find({ type: 'Text', text: /→/ })).toBeUndefined()
   const after = state(posts)!
   expect(after.players.peer.life).toBe(2)
   expect(after.last).toEqual({ round: 1, picks: { peer: 'fire', 'my-session': 'water' }, loser: 'peer' })
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /round 1: .*caren fire.* → caren -1/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /alice water/ })).toBeDefined()
+  await clock.advance(2400)
   await ui.unmount()
+  const after2 = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await after2.find({ type: 'Text', text: /round 1: .*caren fire.* → caren -1/ })).toBeDefined()
+  expect(await after2.find({ type: 'Text', text: /alice water/ })).toBeDefined()
+  await after2.unmount()
 })
 
 test('guest: cast sends intent only; host snapshot is what shows', async ($, on) => {

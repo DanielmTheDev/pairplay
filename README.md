@@ -36,6 +36,10 @@ secret; when both have picked the round resolves and the loser loses one of 3
 lives. At 0 the other player wins; `/coop rematch` starts over. The host's
 session is the referee: it holds the picks and decides every round.
 
+In a terminal the pane draws the duel: two pixel-art wizards (host left in blue,
+guest right in crimson), hearts for lives, and an animation of both spells
+clashing as each round resolves. Needs a truecolor terminal.
+
 `/coop` opens the pane, `/coop leave` leaves the room. The status line shows
 the room and how many peers are connected.
 

@@ -3,6 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Conn, Duel, LogLine, Peer } from '../types'
 import { ELEMENTS, INITIAL_DUEL, acceptSnapshot, applyIntent, isElement, seat } from './game'
+import { ANIM_MS, FRAME_MS, STAGE_PX_H, STAGE_ROWS, drawStage, encodeCells, stageColumns } from './scene'
 import {
   PING_MS,
   PROTOCOL,
@@ -46,6 +47,10 @@ let generation = 0
 let stream: AsyncGenerator<unknown, unknown> | undefined
 let pinger: { cancel(): void } | undefined
 let backoffMs = 1000
+// The round animation: transient, so a module variable; blits drive it, no redraws.
+let anim: { t0: number } | undefined
+let animTimer: { cancel(): void } | undefined
+let stageCols = 0
 
 async function addLog($: $, who: string, text: string, kind: LogLine['kind'] = 'info') {
   await update($, log, list => [...list, { t: Date.now(), who, text, kind }].slice(-200))
@@ -128,7 +133,11 @@ async function handle($: $, env: Envelope) {
       return
     case 'state':
       await seen($, env)
-      if (!(await isHost($))) await update($, game, current => acceptSnapshot(current, env.payload))
+      if (!(await isHost($))) {
+        const before = await read($, game)
+        await update($, game, current => acceptSnapshot(current, env.payload))
+        await onDuelChange($, before, await read($, game))
+      }
       return
   }
 }
@@ -148,12 +157,38 @@ async function hostSeat($: $, id: string, name: string) {
 async function hostApply($: $, id: string, name: string, intent: unknown) {
   await update($, game, d => seat(d, me, myName) ?? d)
   await update($, game, d => seat(d, id, name) ?? d)
-  const next = applyIntent({ duel: await read($, game), picks: await read($, picks) }, id, intent)
+  const before = await read($, game)
+  const next = applyIntent({ duel: before, picks: await read($, picks) }, id, intent)
   if (!next) return null
   await update($, picks, () => next.picks)
   await update($, game, () => next.duel)
   await send($, 'state', next.duel)
+  await onDuelChange($, before, next.duel)
   return next.duel
+}
+
+/** A round just resolved: play it. A first snapshot (joining late) is not replayed. */
+async function onDuelChange($: $, before: Duel, after: Duel) {
+  if (before.seq === 0 || !after.last || after.last.round === before.last?.round) return
+  animTimer?.cancel()
+  anim = { t0: await $.clock.now() }
+  animTimer = $.clock.every(FRAME_MS, () => void tick($))
+  await tick($)
+}
+
+async function tick($: $) {
+  if (!anim) return
+  const t = Math.min(1, ((await $.clock.now()) - anim.t0) / ANIM_MS)
+  const res = stageCols
+    ? await $.ui.blit({ requestId: PANE, key: 'stage', cells: encodeCells(drawStage(await read($, game), stageCols, t), stageCols, STAGE_PX_H) })
+    : { deny: 'no stage' }
+  if (t >= 1 || res.deny) {
+    // Done, or the pane is closed or resized: settle on the final drawing.
+    animTimer?.cancel()
+    animTimer = undefined
+    anim = undefined
+    $.ui.invalidate('ui.render')
+  }
 }
 
 async function act($: $, intent: { kind: 'cast'; element: string } | { kind: 'rematch' }) {
@@ -163,7 +198,7 @@ async function act($: $, intent: { kind: 'cast'; element: string } | { kind: 're
   }
   const d = await hostApply($, me, myName, intent)
   if (!d) return `${describe(intent)}: not allowed now`
-  return d.last && d.last.round === d.round - 1 && intent.kind === 'cast' ? roundText(d) : describe(intent)
+  return d.last && d.last.round === d.round - 1 && intent.kind === 'cast' ? `cast ${intent.element}, round resolves…` : describe(intent)
 }
 
 function describe(intent: { kind: string; element?: string }) {
@@ -302,6 +337,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
+    animTimer?.cancel()
     if (await read($, room)) await send($, 'bye')
     stop()
     return next(e)
@@ -342,6 +378,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
+    const Raster = 'Raster' in els ? els.Raster : undefined
     // Mobile draws no field: chat there via /coop say.
     const Input = 'Input' in els ? els.Input : undefined
     const r = await read($, room)
@@ -349,7 +386,11 @@ export const register: Register = (on, options) => {
     const live = livePeers(await read($, peers), Date.now())
     const lines = await read($, log)
     const g = await read($, game)
-    const rows = Math.max(3, (e.viewport?.rows ?? 24) - 8)
+    const playing = anim !== undefined
+    const t = anim ? Math.min(1, ((await $.clock.now()) - anim.t0) / ANIM_MS) : undefined
+    stageCols = Raster ? stageColumns(e.props.bodyColumns) : 0
+    const color = (id: string) => (id === Object.keys(g.players)[0] ? '#7f9cff' : '#ff6f86')
+    const rows = Math.max(3, (e.viewport?.rows ?? 24) - 8 - (Raster ? STAGE_ROWS + 1 : 0))
 
     return (
       <Box flexDirection="column">
@@ -362,17 +403,37 @@ export const register: Register = (on, options) => {
         {r && (
           <Box flexDirection="column" marginTop={1}>
             <Text bold>
-              {g.winner ? `${nameOf(g, g.winner)} wins!` : `round ${g.round}`}{' '}
+              {playing ? `round ${g.round - 1}…` : g.winner ? `${nameOf(g, g.winner)} wins!` : `round ${g.round}`}{' '}
               <Text dimColor>· {r.role ?? 'guest'}</Text>
             </Text>
-            {Object.entries(g.players).map(([id, p]) => (
+            {Raster && (
+              <Raster
+                key="stage"
+                columns={stageCols}
+                rows={STAGE_ROWS}
+                cells={encodeCells(drawStage(g, stageCols, t), stageCols, STAGE_PX_H)}
+              />
+            )}
+            {Raster ? (
               <Text>
-                {id === me ? 'you' : p.name}: {'♥'.repeat(Math.max(0, p.life))}
-                {'♡'.repeat(Math.max(0, 3 - p.life))}{' '}
-                <Text dimColor>{p.picked ? 'picked' : g.winner ? '' : 'thinking…'}</Text>
+                {Object.entries(g.players).map(([id, p], i) => (
+                  <Text>
+                    {i > 0 ? '   ' : ''}
+                    <Text color={color(id)} bold>{id === me ? `${p.name} (you)` : p.name}</Text>{' '}
+                    <Text dimColor>{playing || g.winner ? '' : p.picked ? 'picked' : 'thinking…'}</Text>
+                  </Text>
+                ))}
               </Text>
-            ))}
-            {g.last && <Text dimColor>{roundText(g)}</Text>}
+            ) : (
+              Object.entries(g.players).map(([id, p]) => (
+                <Text>
+                  {id === me ? 'you' : p.name}: {'♥'.repeat(Math.max(0, p.life))}
+                  {'♡'.repeat(Math.max(0, 3 - p.life))}{' '}
+                  <Text dimColor>{p.picked ? 'picked' : g.winner ? '' : 'thinking…'}</Text>
+                </Text>
+              ))
+            )}
+            {g.last && !playing && <Text dimColor>{roundText(g)}</Text>}
             <Box flexDirection="row" gap={1}>
               {g.winner ? (
                 <Button key="rematch" label="rematch" hotkey="r" onPress={() => void act($, { kind: 'rematch' })} />
