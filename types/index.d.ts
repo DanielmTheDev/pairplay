@@ -55,6 +55,7 @@ declare module 'claude-code' {
       peers: Shaped<Record<string, Peer>>
       log: Shaped<LogLine[]>
       conn: Conn
+      relay: Shaped<string | null>
       game: Shaped<Duel>
       picks: Record<string, Action>
       mine: { round: number; action: Action } | null

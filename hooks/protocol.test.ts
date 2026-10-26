@@ -8,6 +8,7 @@ import {
   splitLines,
   subscribeUrl,
   curlArgs,
+  PING_MS,
   retryDelay,
   STALE_MS,
 } from './protocol'
@@ -64,6 +65,12 @@ test('curl gives up on a silent stream so it reconnects', async () => {
 test('send retries back off, longer on a rate limit, then give up', async () => {
   expect(retryDelay(0, 500)).toBe(500)
   expect(retryDelay(1, 500)).toBeGreaterThan(retryDelay(0, 500))
-  expect(retryDelay(0, 429)).toBeGreaterThan(retryDelay(0, 500))
   expect(retryDelay(4, 500)).toBe(null)
+  // A rate limit (a daily quota on ntfy.sh) does not clear in seconds: no retry burns more of it.
+  expect(retryDelay(0, 429)).toBe(null)
+})
+
+test('presence pings are rare: a few an hour, not one a minute', async () => {
+  expect(PING_MS).toBeGreaterThanOrEqual(240_000)
+  expect(STALE_MS).toBeGreaterThan(2 * PING_MS)
 })

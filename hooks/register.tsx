@@ -23,6 +23,7 @@ import {
   curlArgs,
   livePeers,
   makeRoomCode,
+  normalizeRelay,
   normalizeRoomCode,
   parseLine,
   publishUrl,
@@ -45,7 +46,16 @@ const SPELLS: { action: Action; label: string; hotkey: string }[] = [
   ...ELEMENTS.map((el, i) => ({ action: el, label: el, hotkey: String(i + 1) })),
   ...ELEMENTS.map((el, i) => ({ action: `${el}+` as const, label: `${el}+`, hotkey: String(i + 4) })),
 ]
-const ROWS = [MOVES, SPELLS]
+
+/** The button rows for a pane `columns` wide: moves, then spells, each wrapped to fit. */
+function cardRows(columns: number) {
+  const per = Math.max(1, Math.floor(columns / CARD_COLS))
+  const chunk = (row: typeof MOVES) => Array.from({ length: Math.ceil(row.length / per) }, (_, i) => row.slice(i * per, (i + 1) * per))
+  return [...chunk(MOVES), ...chunk(SPELLS)]
+}
+
+/** Pane rows the duel needs besides the cards: header, round, stage, players, result, input, a little log. */
+const DUEL_ROWS = 2 + 1 + 1 + STAGE_ROWS + 2 + 1 + 1 + 3
 
 function cardCells(row: typeof MOVES, p: Player | undefined, now: number) {
   const cols = row.length * CARD_COLS
@@ -56,6 +66,8 @@ const room = atom({ plugin: 'pairplay', key: 'room' } as const, null, { shape: '
 const peers = atom({ plugin: 'pairplay', key: 'peers' } as const, {}, { shape: 'peers-1' })
 const log = atom({ plugin: 'pairplay', key: 'log' } as const, [], { shape: 'log-1' })
 const conn = atom({ plugin: 'pairplay', key: 'conn' } as const, 'off' as Conn)
+// The relay chosen with `/coop relay` or a join link; null: the configured one.
+const relayChoice = atom({ plugin: 'pairplay', key: 'relay' } as const, null, { shape: 'relay-1' })
 const game = atom({ plugin: 'pairplay', key: 'game' } as const, INITIAL_DUEL, { shape: 'duel-2' })
 // Host only: the round's hidden picks, never broadcast.
 const picks = atom({ plugin: 'pairplay', key: 'picks' } as const, {})
@@ -64,7 +76,8 @@ const mine = atom({ plugin: 'pairplay', key: 'mine' } as const, null)
 
 const HELP = [
   '/coop host          create a room, share the code',
-  '/coop join <code>   join the other player',
+  '/coop join <code> [relay]  join the other player',
+  '/coop relay [url]   show or switch the relay (both players)',
   '/coop say <text>    chat (or type in the pane)',
   '/coop <action>      charge | supercharge | shield | drain (1 mana) | heal (1)',
   '                    fire | water | nature (1), fire+ ... (2)',
@@ -76,7 +89,9 @@ const HELP = [
 type $ = EngineInterface
 
 // Module state: starts over on every reload; the subscription restarts from `room`.
-let relay = 'https://ntfy.sh'
+let configuredRelay = 'https://ntfy.sh'
+// The relay in use, fixed when the link starts: a switch restarts the link.
+let relay = configuredRelay
 let me = ''
 let myName = 'player'
 let generation = 0
@@ -93,6 +108,8 @@ let statesSeen = 0
 let anim: { t0: number } | undefined
 let loop: { cancel(): void } | undefined
 let stageCols = 0
+// The card rows the pane drew, for the loop to repaint; empty when it drew none.
+let shownCards: (typeof MOVES)[] = []
 
 async function addLog($: $, who: string, text: string, kind: LogLine['kind'] = 'info') {
   await update($, log, list => [...list, { t: Date.now(), who, text, kind }].slice(-200))
@@ -115,6 +132,10 @@ async function send($: $, type: string, payload?: unknown) {
   }
 }
 
+async function relayOf($: $) {
+  return (await read($, relayChoice)) ?? configuredRelay
+}
+
 async function publish($: $, type: string, payload?: unknown) {
   const r = await read($, room)
   if (!r) return false
@@ -127,7 +148,7 @@ async function publish($: $, type: string, payload?: unknown) {
       const res = await $.http.fetch(publishUrl(relay, r.code), { method: 'POST', body: JSON.stringify(env) })
       if (res.ok) return true
       status = res.status
-      why = `HTTP ${res.status}${res.status === 429 ? ' (relay rate limit, try a self-hosted relayUrl)' : ''}`
+      why = `HTTP ${res.status}${res.status === 429 ? ` (${relay} quota reached; both players: /coop relay <url>)` : ''}`
     } catch (err) {
       why = String(err)
     }
@@ -303,7 +324,7 @@ async function tick($: $) {
   await $.ui.blit({ requestId: PANE, key: 'stage', cells: encodeCells(drawStage(d, stageCols, view), stageCols, STAGE_PX_H) })
   if (d.winner === undefined) {
     const p = d.players[me]
-    await Promise.all(ROWS.map((row, i) => $.ui.blit({ requestId: PANE, key: `cards-${i}`, cells: cardCells(row, p, view.now) })))
+    await Promise.all(shownCards.map((row, i) => $.ui.blit({ requestId: PANE, key: `cards-${i}`, cells: cardCells(row, p, view.now) })))
   }
 }
 
@@ -449,17 +470,23 @@ function stop() {
 
 async function start($: $) {
   stop()
+  relay = await relayOf($)
   const gen = generation
   backoffMs = 1000
   void quietly(() => subscribe($, gen))
   // Announce once the stream had a moment to open, so the answer isn't missed.
   $.clock.after(1500, () => void send($, 'hello'))
   startLoop($)
-  pinger = $.clock.every(PING_MS, () => {
+  const ping = () => {
     void quietly(async () => void send($, 'ping', { seq: (await read($, game)).seq }))
     void quietly(() => refreshStatus($))
-  })
+  }
+  // One ping soon after connecting, so whoever is behind catches up; then rarely.
+  $.clock.after(FIRST_PING_MS, () => gen === generation && ping())
+  pinger = $.clock.every(PING_MS, ping)
 }
+
+const FIRST_PING_MS = 5000
 
 /** Switches to room `code`; answers a message when nothing changed. */
 async function enter($: $, code: string, role: 'host' | 'guest') {
@@ -497,7 +524,7 @@ async function say($: $, text: string) {
 }
 
 export const register: Register = (on, options) => {
-  relay = String(options.relayUrl || 'https://ntfy.sh')
+  configuredRelay = normalizeRelay(String(options.relayUrl || '')) ?? 'https://ntfy.sh'
   // A fresh activation owns nothing of an earlier one's timers or queue.
   stop()
   hostQueue = Promise.resolve()
@@ -534,13 +561,30 @@ export const register: Register = (on, options) => {
       case 'host': {
         const code = makeRoomCode(crypto.getRandomValues(new Uint8Array(8)))
         await enter($, code, 'host')
-        await $.ui.copy({ text: code })
-        return { text: `Hosting room ${code} (copied). Other player: /coop join ${code}` }
+        const relay = await relayOf($)
+        const join = relay === configuredRelay ? `/coop join ${code}` : `/coop join ${code} ${relay}`
+        await $.ui.copy({ text: join })
+        return { text: `Hosting room ${code} · other player: ${join} (copied)` }
       }
       case 'join': {
-        const code = normalizeRoomCode(arg)
-        if (!code) return { text: `Bad room code "${arg}". Expected XXXX-XXXX.` }
+        const [raw = '', url] = rest
+        const code = normalizeRoomCode(raw)
+        if (!code) return { text: `Bad room code "${raw}". Expected XXXX-XXXX.` }
+        if (url !== undefined) {
+          const relay = normalizeRelay(url)
+          if (!relay) return { text: `Bad relay "${url}". Expected an http(s) URL.` }
+          await update($, relayChoice, () => relay)
+        }
         return { text: (await enter($, code, 'guest')) ?? `Joining room ${code}…` }
+      }
+      case 'relay': {
+        if (!arg) return { text: `relay: ${await relayOf($)}` }
+        const relay = arg === 'default' ? null : normalizeRelay(arg)
+        if (relay === null && arg !== 'default') return { text: `Bad relay "${arg}". Expected an http(s) URL, or default.` }
+        await update($, relayChoice, () => relay)
+        // A room in progress moves over: both players have to switch.
+        if (await read($, room)) await start($)
+        return { text: `relay set: ${await relayOf($)}` }
       }
       case 'say':
         return { text: arg ? await say($, arg) : 'Nothing to say.' }
@@ -576,7 +620,12 @@ export const register: Register = (on, options) => {
     const view = await stageView($, g)
     stageCols = Raster ? stageColumns(e.props.bodyColumns) : 0
     const color = (id: string) => (id === Object.keys(g.players)[0] ? '#7f9cff' : '#ff6f86')
-    const rows = Math.max(3, (e.viewport?.rows ?? 24) - 8 - (Raster ? STAGE_ROWS + 1 : 0))
+    const buttons = cardRows(e.props.bodyColumns)
+    // Cards only where they fit: on a short pane the buttons alone, under the stage.
+    const cardsFit = !e.viewport || e.viewport.rows >= DUEL_ROWS + buttons.length * (CARD_ROWS + 1)
+    shownCards = Raster && cardsFit ? buttons : []
+    const used = 8 + (Raster ? STAGE_ROWS + 1 : 0) + buttons.length * (shownCards.length ? CARD_ROWS + 1 : 1)
+    const rows = Math.max(3, (e.viewport?.rows ?? 24) - used)
 
     return (
       <Box flexDirection="column">
@@ -620,9 +669,9 @@ export const register: Register = (on, options) => {
             {g.winner ? (
               <Button key="rematch" label="⚔ rematch" hotkey="r" onPress={() => void act($, { kind: 'rematch' })} />
             ) : (
-              ROWS.map((row, i) => (
+              buttons.map((row, i) => (
                 <Box flexDirection="column">
-                  {Raster && (
+                  {Raster && shownCards.length > 0 && (
                     <Raster
                       key={`cards-${i}`}
                       columns={row.length * CARD_COLS}
@@ -634,7 +683,7 @@ export const register: Register = (on, options) => {
                     {row.map(b => {
                       const p = g.players[me]
                       return (
-                        <Box width={CARD_COLS}>
+                        <Box width={CARD_COLS} flexShrink={0}>
                           {p && legal(p, b.action) ? (
                             <Button
                               key={b.action}

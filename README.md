@@ -22,6 +22,12 @@ Update later: `/plugin update pairplay`, then `/reload-plugins`.
 
 Needs `curl` on the PATH (it holds the live connection to the relay).
 
+Relay: the pairplay Cloudflare Worker (`relay/`, deployed at
+https://pairplay-relay.dadamuck.workers.dev) by default. `/coop relay <url>`
+switches, e.g. to `https://ntfy.sh` (which caps messages per IP per day) or your
+own deploy (`relay/README.md`); the host's `/coop host` then copies a
+`/coop join CODE <url>` line for the other player.
+
 ## Play
 
 | Player 1 | Player 2 |

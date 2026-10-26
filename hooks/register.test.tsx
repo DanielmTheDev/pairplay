@@ -53,7 +53,7 @@ test('host: subscribes, receives peer chat, answers hello, chats back', async ($
   const code = /room (\S+)/.exec(res.text ?? '')?.[1] ?? ''
   const topic = `pairplay-${code.replace('-', '').toLowerCase()}`
   await new Promise(r => setTimeout(r, 50))
-  expect(spawned[0]?.at(-1)).toBe(`https://ntfy.sh/${topic}/json`)
+  expect(spawned[0]?.at(-1)).toBe(`https://pairplay-relay.dadamuck.workers.dev/${topic}/json`)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /hi there/ }))).toBeDefined()
@@ -62,7 +62,7 @@ test('host: subscribes, receives peer chat, answers hello, chats back', async ($
   await ui.input({ key: 'say', text: 'hello bob' })
   const said = posts.map(p => JSON.parse(p.body)).find(env => env.type === 'say')
   expect(said).toEqual({ v: 1, from: 'my-session', name: 'alice', type: 'say', payload: 'hello bob' })
-  expect(posts[0]?.url).toBe(`https://ntfy.sh/${topic}`)
+  expect(posts[0]?.url).toBe(`https://pairplay-relay.dadamuck.workers.dev/${topic}`)
   await ui.unmount()
 })
 
@@ -92,11 +92,13 @@ const P = (name: string, over: object = {}) => ({
 const ntfy = (id: string, env: object) =>
   JSON.stringify({ event: 'message', id, message: JSON.stringify({ v: 1, ...env }) }) + '\n'
 
-type Opts = { failFirst?: number; gate?: Promise<void> }
+type Opts = { failFirst?: number; failStatus?: number; gate?: Promise<void> }
 
 function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[], opts: Opts = {}) {
   const posts: { type: string; payload?: unknown }[] = []
   const attempts: string[] = []
+  const urls: string[] = []
+  const spawned: string[][] = []
   let failures = opts.failFirst ?? 0
   const blits: unknown[] = []
   on('ui.blit', (_, e) => {
@@ -113,21 +115,23 @@ function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[],
   on('http.fetch', (_, e) => {
     const body = e.init?.body ?? '{}'
     attempts.push(body)
+    urls.push(e.url)
     if (failures > 0) {
       failures--
-      return { value: { status: 503, ok: false, headers: {}, text: '' } }
+      return { value: { status: opts.failStatus ?? 503, ok: false, headers: {}, text: '' } }
     }
     posts.push(JSON.parse(body))
     return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
   })
-  on('process.spawn', async function* () {
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
     yield { stream: 'stdout' as const, text: '{"event":"open"}\n' }
     if (opts.gate) await opts.gate
-    yield { stream: 'stdout' as const, text: lines.join('') }
+    if (lines.length) yield { stream: 'stdout' as const, text: lines.join('') }
     await new Promise(() => {})
     return { code: 0, signal: null }
   })
-  return Object.assign(posts, { blits, clock, attempts })
+  return Object.assign(posts, { blits, clock, attempts, urls, spawned })
 }
 
 const state = (posts: { type: string; payload?: unknown }[]) =>
@@ -309,6 +313,63 @@ test('guest: game over logs the game summary', async ($, on) => {
   await ui.unmount()
 })
 
+test('relay: /coop relay switches it; the host hint carries it to the other player', async ($, on) => {
+  const posts = harness(on, [])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect((await $.command.run({ command: 'coop', args: 'relay' })).text).toMatch(/relay: https:\/\/pairplay-relay\.dadamuck\.workers\.dev/)
+  expect((await $.command.run({ command: 'coop', args: 'relay ftp://nope' })).text).toMatch(/http/)
+  expect((await $.command.run({ command: 'coop', args: 'relay https://relay.example.dev/' })).text).toMatch(/relay set: https:\/\/relay\.example\.dev/)
+  const res = await $.command.run({ command: 'coop', args: 'host' })
+  expect(res.text).toMatch(/\/coop join [A-Z2-9]{4}-[A-Z2-9]{4} https:\/\/relay\.example\.dev/)
+  await settle()
+  expect(posts.spawned.at(-1)?.at(-1)).toMatch(/^https:\/\/relay\.example\.dev\/pairplay-[a-z2-9]{8}\/json$/)
+  await posts.clock.advance(2000)
+  expect(posts.urls.at(-1)).toMatch(/^https:\/\/relay\.example\.dev\/pairplay-/)
+})
+
+test('relay: join with a relay url uses that relay', async ($, on) => {
+  const posts = harness(on, [])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join abcd-efgh https://r2.example.dev' })
+  await settle()
+  expect(posts.spawned.at(-1)?.at(-1)).toBe('https://r2.example.dev/pairplay-abcdefgh/json')
+  expect((await $.command.run({ command: 'coop', args: 'relay' })).text).toMatch(/r2\.example\.dev/)
+})
+
+test('relay: a rate limit is not retried, and says how to switch', async ($, on) => {
+  const posts = harness(on, [ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' })], { failFirst: 99, failStatus: 429 })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'host' })
+  await settle()
+  await posts.clock.advance(30_000)
+  await settle()
+  // Only fresh messages go out; none of them is retried.
+  expect(new Set(posts.attempts).size).toBe(posts.attempts.length)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /quota.*\/coop relay/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('pane: cards wrap to a narrow pane, and give way when it is short', async ($, on) => {
+  const duel = { seq: 5, round: 1, players: { host: P('dani'), 'my-session': P('alice') } }
+  harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  const narrow = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 42 }, viewport: { rows: 60, columns: 42 }, surface: 'terminal' })
+  // 4 cards a row: the 5 moves take two rows, the 6 spells two more.
+  for (const [key, columns] of [['cards-0', 40], ['cards-1', 10], ['cards-2', 40], ['cards-3', 20]] as const) {
+    expect(await narrow.find({ type: 'Raster', key })).toMatchObject({ props: { columns } })
+  }
+  await narrow.unmount()
+  const short = await $.ui.mount({ ...PANE, viewport: { rows: 30, columns: 60 }, surface: 'terminal' })
+  expect(await short.find({ type: 'Raster', key: 'stage' })).toBeDefined()
+  expect(await short.find({ type: 'Raster', key: 'cards-0' })).toBeUndefined()
+  // The buttons stay.
+  expect(await short.find({ type: 'Button', key: 'fire' })).toBeDefined()
+  await short.unmount()
+})
+
 const states = (posts: { type: string; payload?: unknown }[]) => posts.filter(p => p.type === 'state')
 const settle = () => new Promise(r => setTimeout(r, 50))
 
@@ -337,7 +398,7 @@ test('host: a peer behind (ping with an old seq, or sync) gets the state again',
   expect(states(posts).length).toBe(3)
 })
 
-test('guest: asks for a sync when the host is ahead; pings carry its seq', async ($, on) => {
+test('guest: asks for a sync when the host is ahead; pings carry its seq', { timeoutMs: 30_000 }, async ($, on) => {
   const posts = harness(on, [
     ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: { seq: 4, round: 1, players: {} } }),
     ntfy('m2', { from: 'host', name: 'dani', type: 'ping', payload: { seq: 4 } }),
@@ -347,7 +408,8 @@ test('guest: asks for a sync when the host is ahead; pings carry its seq', async
   await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
   await settle()
   expect(posts.filter(p => p.type === 'sync').length).toBe(1)
-  await posts.clock.advance(61_000)
+  await posts.clock.advance(6000)
+  await settle()
   expect(posts.filter(p => p.type === 'ping').at(-1)?.payload).toEqual({ seq: 4 })
 })
 

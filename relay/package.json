@@ -1,0 +1,16 @@
+{
+  "name": "pairplay-relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --experimental-strip-types src/core.spec.ts",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "@types/node": "^26.6.5",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.152.0"
+  }
+}

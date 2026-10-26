@@ -12,8 +12,8 @@
     "relayUrl": {
       "type": "string",
       "title": "Relay URL",
-      "description": "ntfy server both players use (self-host + tunnel if ntfy.sh rate-limits)",
-      "default": "https://ntfy.sh"
+      "description": "Relay both players use: ntfy.sh, or your own (relay/README.md); /coop relay <url> switches at runtime",
+      "default": "https://pairplay-relay.dadamuck.workers.dev"
     },
     "playerName": {
       "type": "string",

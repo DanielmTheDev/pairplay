@@ -3,9 +3,9 @@
 import type { Peer } from '../types'
 
 export const PROTOCOL = 1
-// Presence: ping rarely (ntfy.sh rate-limits per IP), call a peer gone after missing two.
-export const PING_MS = 60_000
-export const STALE_MS = 150_000
+// Presence: ping rarely (ntfy.sh caps messages per IP per day), call a peer gone after missing two.
+export const PING_MS = 240_000
+export const STALE_MS = 600_000
 
 // Crockford-ish alphabet: no 0/O/1/I/L confusion when read aloud.
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
@@ -53,10 +53,19 @@ export function curlArgs(url: string): string[] {
   return ['curl', '-sN', '--fail', '--connect-timeout', '10', '--speed-time', '100', '--speed-limit', '1', url]
 }
 
-/** Wait before resend `attempt` (0-based) of a failed publish; null: give up. */
+/**
+ * Wait before resend `attempt` (0-based) of a failed publish; null: give up.
+ * A rate limit is never retried: on ntfy.sh it is a daily quota, and every try counts.
+ */
 export function retryDelay(attempt: number, status: number): number | null {
-  if (attempt >= 4) return null
-  return (status === 429 ? 2000 : 500) * 2 ** attempt
+  if (attempt >= 4 || status === 429) return null
+  return 500 * 2 ** attempt
+}
+
+/** A relay base URL as typed (`https://host/`), or null when it is not http(s). */
+export function normalizeRelay(raw: string): string | null {
+  const url = raw.trim().replace(/\/+$/, '')
+  return /^https?:\/\/[^\s/]+(\/[^\s]*)?$/.test(url) ? url : null
 }
 
 export function publishUrl(relay: string, code: string): string {
