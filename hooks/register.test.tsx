@@ -82,17 +82,19 @@ const P = (name: string, over: object = {}) => ({
   life: 3,
   mana: 1,
   picked: false,
-  shieldLocked: false,
+  shieldCooldown: 0,
   drainCooldown: 0,
   superCooldown: 0,
   healCooldown: 0,
+  avatarUsed: false,
+  ready: true,
   ...over,
 })
 
 const ntfy = (id: string, env: object) =>
   JSON.stringify({ event: 'message', id, message: JSON.stringify({ v: 1, ...env }) }) + '\n'
 
-type Opts = { failFirst?: number; failStatus?: number; gate?: Promise<void> }
+type Opts = { failFirst?: number; failStatus?: number; gate?: Promise<void>; more?: Promise<string[]> }
 
 function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[], opts: Opts = {}) {
   const posts: { type: string; payload?: unknown }[] = []
@@ -128,6 +130,8 @@ function harness(on: Parameters<Parameters<typeof test>[1]>[1], lines: string[],
     yield { stream: 'stdout' as const, text: '{"event":"open"}\n' }
     if (opts.gate) await opts.gate
     if (lines.length) yield { stream: 'stdout' as const, text: lines.join('') }
+    // Messages that come later, once the test says so.
+    if (opts.more) yield { stream: 'stdout' as const, text: (await opts.more).join('') }
     await new Promise(() => {})
     return { code: 0, signal: null }
   })
@@ -138,14 +142,27 @@ const state = (posts: { type: string; payload?: unknown }[]) =>
   posts.filter(p => p.type === 'state').at(-1)?.payload as Record<string, any> | undefined
 
 test('host: seats guest, hides first pick, resolves on second', async ($, on) => {
-  const posts = harness(on, [
-    ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
-    ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'act', action: 'fire' } }),
-  ])
+  let open = () => {}
+  const gate = new Promise<void>(r => (open = r))
+  const posts = harness(
+    on,
+    [
+      ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
+      ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'loadout', spells: ['fire', 'nature', 'drain'] } }),
+      ntfy('m3', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'act', action: 'fire' } }),
+    ],
+    { gate },
+  )
   const { blits, clock } = posts
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'coop', args: 'host' })
-  await new Promise(r => setTimeout(r, 50))
+  await settle()
+  expect((await $.command.run({ command: 'coop', args: 'pick water fire+ avatar' })).text).toMatch(/water, fire\+, avatar/)
+  open()
+  await settle()
+  // Neither player's spells go out.
+  expect(JSON.stringify(posts)).not.toContain('"avatar"')
+  expect(JSON.stringify(posts)).not.toContain('"drain"')
 
   const hidden = state(posts)!
   expect(hidden.players.peer).toEqual(P('caren', { picked: true }))
@@ -236,7 +253,7 @@ test('guest: pane shows mana and timers, greys out what is not allowed', async (
     round: 4,
     players: {
       host: P('dani', { mana: 3 }),
-      'my-session': P('alice', { life: 2, mana: 1, shieldLocked: true, drainCooldown: 2, superCooldown: 3, healCooldown: 1 }),
+      'my-session': P('alice', { life: 2, mana: 1, shieldCooldown: 2, drainCooldown: 2, superCooldown: 3, healCooldown: 1 }),
     },
   }
   const posts = harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
@@ -245,18 +262,19 @@ test('guest: pane shows mana and timers, greys out what is not allowed', async (
   await settle()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /alice.*◆◇◇.*shield locked.*drain in 2.*super in 3.*heal in 1/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /alice.*◆◇◇.*shield in 2.*drain in 2.*super in 3.*heal in 1/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /dani.*◆◆◆/ })).toBeDefined()
   // Action cards above the buttons, animated by the stage loop.
-  expect(await ui.find({ type: 'Raster', key: 'cards-0' })).toMatchObject({ props: { columns: 50, rows: 5 } })
+  // No spells chosen known here (joined late): every action, six to a row.
+  expect(await ui.find({ type: 'Raster', key: 'cards-0' })).toMatchObject({ props: { columns: 60, rows: 5 } })
   expect(await ui.find({ type: 'Raster', key: 'cards-1' })).toMatchObject({ props: { columns: 60, rows: 5 } })
   expect(await ui.find({ type: 'Button', key: 'fire' })).toMatchObject({ props: { label: 'fire', hotkey: '1', plain: true } })
   // Only what is allowed is pressable; the rest is drawn, not a Button.
   const button = (key: string) => ui.find({ type: 'Button', key })
   expect(await button('charge')).toBeDefined()
   expect(await button('fire')).toBeDefined()
-  for (const key of ['shield', 'drain', 'supercharge', 'fire+', 'water+', 'nature+', 'heal']) expect(await button(key)).toBeUndefined()
-  expect((await $.command.run({ command: 'coop', args: 'shield' })).text).toMatch(/shield locked/)
+  for (const key of ['shield', 'drain', 'supercharge', 'fire+', 'water+', 'nature+', 'heal', 'avatar']) expect(await button(key)).toBeUndefined()
+  expect((await $.command.run({ command: 'coop', args: 'shield' })).text).toMatch(/shield in 2/)
   expect((await $.command.run({ command: 'coop', args: 'fire+' })).text).toMatch(/needs 2 mana/)
   expect((await $.command.run({ command: 'coop', args: 'supercharge' })).text).toMatch(/super in 3/)
   expect(posts.some(p => p.type === 'intent')).toBe(false)
@@ -357,8 +375,8 @@ test('pane: cards wrap to a narrow pane, and give way when it is short', async (
   await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
   await settle()
   const narrow = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 42 }, viewport: { rows: 60, columns: 42 }, surface: 'terminal' })
-  // 4 cards a row: the 5 moves take two rows, the 6 spells two more.
-  for (const [key, columns] of [['cards-0', 40], ['cards-1', 10], ['cards-2', 40], ['cards-3', 20]] as const) {
+  // 4 cards a row: the 12 actions take three rows.
+  for (const [key, columns] of [['cards-0', 40], ['cards-1', 40], ['cards-2', 40]] as const) {
     expect(await narrow.find({ type: 'Raster', key })).toMatchObject({ props: { columns } })
   }
   await narrow.unmount()
@@ -441,15 +459,15 @@ test('guest: resends a cast nobody answered, stops once answered', async ($, on)
 })
 
 test('host: own cast and a guest intent at the same moment both count', async ($, on) => {
-  let open = () => {}
-  const gate = new Promise<void>(r => (open = r))
+  let deliver = (_: string[]) => {}
+  const more = new Promise<string[]>(r => (deliver = r))
   const posts = harness(
     on,
     [
       ntfy('m1', { from: 'peer', name: 'caren', type: 'hello' }),
-      ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'act', action: 'fire' } }),
+      ntfy('m2', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'loadout', spells: ['fire', 'drain', 'avatar'] } }),
     ],
-    { gate },
+    { more },
   )
   // Slow state reads, like a busy engine: lets the two writers interleave.
   on('state.get', async (_, e, next) => {
@@ -459,8 +477,9 @@ test('host: own cast and a guest intent at the same moment both count', async ($
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'coop', args: 'host' })
   await settle()
+  await $.command.run({ command: 'coop', args: 'pick water nature fire' })
   const mine = $.command.run({ command: 'coop', args: 'cast water' })
-  open()
+  deliver([ntfy('m3', { from: 'peer', name: 'caren', type: 'intent', payload: { kind: 'act', action: 'fire' } })])
   await mine
   const resolved = () => (states(posts).at(-1)?.payload as Record<string, any> | undefined)?.last
   for (let i = 0; i < 80 && !resolved(); i++) await new Promise(r => setTimeout(r, 25))
@@ -474,4 +493,151 @@ test('host: own cast and a guest intent at the same moment both count', async ($
     expect(bySeq.get(d.seq) ?? json).toBe(json)
     bySeq.set(d.seq, json)
   }
+})
+
+// ─── choosing spells ─────────────────────────────────────────────────────────
+
+test('choose: a 3×3 grid of the optional spells; start once three are ticked', async ($, on) => {
+  const duel = { seq: 5, round: 1, players: { host: P('dani', { ready: false }), 'my-session': P('alice', { ready: false }) } }
+  const posts = harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  for (const key of ['draft-0', 'draft-1', 'draft-2']) expect(await ui.find({ type: 'Raster', key })).toMatchObject({ props: { columns: 60, rows: 5 } })
+  for (const [i, a] of ['fire', 'water', 'nature', 'fire+', 'water+', 'nature+', 'supercharge', 'drain', 'avatar'].entries()) {
+    expect(await ui.find({ type: 'Button', key: `pick-${a}` })).toMatchObject({ props: { hotkey: String(i + 1) } })
+  }
+  expect(await ui.find({ type: 'Text', text: /2 dmg, beats all/ })).toBeDefined()
+  // No duel yet: no action buttons, no start.
+  expect(await ui.find({ type: 'Button', key: 'charge' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'start' })).toBeUndefined()
+  await ui.press({ key: 'pick-fire' })
+  await ui.press({ key: 'pick-drain' })
+  await ui.press({ key: 'pick-avatar' })
+  await ui.unmount()
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /3\/3/ })).toBeDefined()
+  await ui.press({ key: 'start' })
+  expect(posts.filter(p => p.type === 'intent').at(-1)?.payload).toEqual({ kind: 'loadout', spells: ['fire', 'drain', 'avatar'] })
+  await ui.unmount()
+})
+
+test('choose: a fourth tick is ignored, a second tick takes one back', async ($, on) => {
+  const duel = { seq: 5, round: 1, players: { host: P('dani', { ready: false }), 'my-session': P('alice', { ready: false }) } }
+  const posts = harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  for (const a of ['fire', 'water', 'nature', 'drain']) await ui.press({ key: `pick-${a}` })
+  await ui.press({ key: 'pick-water' })
+  await ui.press({ key: 'pick-avatar' })
+  await ui.unmount()
+  const again = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await again.press({ key: 'start' })
+  expect(posts.filter(p => p.type === 'intent').at(-1)?.payload).toEqual({ kind: 'loadout', spells: ['fire', 'nature', 'avatar'] })
+  await again.unmount()
+})
+
+test('choose: /coop pick checks the spells before they go out', async ($, on) => {
+  const duel = { seq: 5, round: 1, players: { host: P('dani', { ready: false }), 'my-session': P('alice', { ready: false }) } }
+  const posts = harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  expect((await $.command.run({ command: 'coop', args: 'fire' })).text).toMatch(/choose your spells/)
+  expect((await $.command.run({ command: 'coop', args: 'pick fire water' })).text).toMatch(/3 different/)
+  expect((await $.command.run({ command: 'coop', args: 'pick fire water shield' })).text).toMatch(/3 different/)
+  expect(posts.some(p => p.type === 'intent')).toBe(false)
+  await $.command.run({ command: 'coop', args: 'pick fire water+ avatar' })
+  expect(posts.filter(p => p.type === 'intent').at(-1)?.payload).toEqual({ kind: 'loadout', spells: ['fire', 'water+', 'avatar'] })
+})
+
+test('choose: the opponent\'s spells are never shown; only that they are ready', async ($, on) => {
+  const duel = { seq: 5, round: 1, players: { host: P('dani', { ready: true }), 'my-session': P('alice', { ready: false }) } }
+  harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /dani is ready/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('duel: only the three basics and the three chosen are offered', async ($, on) => {
+  const duel = { seq: 5, round: 1, players: { host: P('dani', { ready: false }), 'my-session': P('alice', { ready: false }) } }
+  const ready = { seq: 7, round: 1, players: { host: P('dani'), 'my-session': P('alice', { mana: 2, life: 2 }) } }
+  let deliver = (_: string[]) => {}
+  const more = new Promise<string[]>(r => (deliver = r))
+  harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })], { more })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  await $.command.run({ command: 'coop', args: 'pick fire water+ avatar' })
+  deliver([ntfy('m2', { from: 'host', name: 'dani', type: 'state', payload: ready })])
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  for (const key of ['charge', 'shield', 'heal', 'fire', 'water+']) expect(await ui.find({ type: 'Button', key })).toBeDefined()
+  // Chosen but short of mana: drawn, not pressable.
+  expect(await ui.find({ type: 'Button', key: 'avatar' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /a: avatar/ })).toBeDefined()
+  for (const key of ['supercharge', 'drain', 'water', 'nature', 'fire+', 'nature+']) {
+    expect(await ui.find({ type: 'Button', key })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: new RegExp(`: ${key.replace('+', '\\+')}$`) })).toBeUndefined()
+  }
+  expect(await ui.find({ type: 'Raster', key: 'cards-0' })).toMatchObject({ props: { columns: 60 } })
+  expect(await ui.find({ type: 'Raster', key: 'cards-1' })).toBeUndefined()
+  expect((await $.command.run({ command: 'coop', args: 'drain' })).text).toMatch(/not in your spells/)
+  await ui.unmount()
+})
+
+// ─── chaos ───────────────────────────────────────────────────────────────────
+
+test('chaos: announced in the pane, name and effect, and how long a lasting one holds', async ($, on) => {
+  const chaos = { event: 'eclipse', round: 4, until: 5, before: { host: { life: 3, mana: 1 }, 'my-session': { life: 3, mana: 1 } } }
+  const duel = { seq: 9, round: 4, players: { host: P('dani'), 'my-session': P('alice') }, chaos, chaosCount: 1 }
+  let deliver = (_: string[]) => {}
+  const more = new Promise<string[]>(r => (deliver = r))
+  harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })], { more })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Eclipse!.*fire > water > nature > fire.*2 rounds left/ })).toBeDefined()
+  await ui.unmount()
+  deliver([ntfy('m2', { from: 'host', name: 'dani', type: 'state', payload: { ...duel, seq: 10, round: 5 } })])
+  await settle()
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Eclipse.*last round/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('chaos: plays after the round that brought it, then says so in the log', async ($, on) => {
+  const before = { seq: 8, round: 3, players: { host: P('dani'), 'my-session': P('alice') } }
+  const chaos = { event: 'lightning', round: 4, until: 4, before: { host: { life: 3, mana: 1 }, 'my-session': { life: 3, mana: 1 } } }
+  const after = {
+    seq: 9,
+    round: 4,
+    players: { host: P('dani', { mana: 3 }), 'my-session': P('alice', { mana: 3 }) },
+    last: { round: 3, picks: { host: 'shield', 'my-session': 'shield' }, loser: null, dmg: 0, stole: false, healed: {} },
+    chaos,
+    chaosCount: 1,
+  }
+  const { clock } = harness(on, [
+    ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: before }),
+    ntfy('m2', { from: 'host', name: 'dani', type: 'state', payload: after }),
+  ])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // The round plays first: no spoiler.
+  expect(await ui.find({ type: 'Text', text: /Lightning Storm/ })).toBeUndefined()
+  await ui.unmount()
+  await clock.advance(3000)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Lightning Storm!.*both at 3 mana/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /chaos Lightning Storm/ })).toBeDefined()
+  await ui.unmount()
 })

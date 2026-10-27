@@ -35,20 +35,45 @@ own deploy (`relay/README.md`); the host's `/coop host` then copies a
 | `/coop host` → room code shown and copied | |
 | send the code to player 2 | `/coop join ABCD-EFGH` |
 | chat: type in the pane, or `/coop say hi` | same |
+| choose 3 spells: tick them in the pane, or `/coop pick fire drain avatar` | same |
 | duel: `/coop charge`, `/coop fire+` … (or the pane buttons) | `/coop shield` |
 
-Mana duel (full rules: `mana-spec.md`). 3 life, start with 1 mana, cap 3. Both
-pick one action in secret (changeable until the other has picked):
+Mana duel (full rules: `mana-spec.md`). 3 life, start with 1 mana, cap 3.
+
+Every game starts with each player choosing, in secret, 3 of the 9 optional
+spells (a 3×3 grid of cards with cost and effect; start once three are ticked).
+Charge, shield and heal are always yours, so each player duels with 6 actions.
+The other player only sees that you are ready; both sets are revealed when the
+game is won. A rematch chooses again.
+
+Then both pick one action a round in secret (changeable until the other has picked):
 
 | Action | Cost | Effect | Key |
 | --- | --- | --- | --- |
-| charge | 0 | +1 mana (not at 3) | c |
+| charge (basic) | 0 | +1 mana (not at 3) | c |
+| shield (basic) | 0 | blocks all damage and theft; 2-round cooldown (round 1 → back in round 4) | s |
+| heal (basic) | 1 | +2 life (max 3), fizzles if hit; 1-round cooldown | h |
 | supercharge | 0 | +2 mana (capped at 3); out for 5 rounds after | u |
-| shield | 0 | blocks all damage and theft; not two rounds in a row | s |
 | fire / water / nature | 1 | 1 damage; water > fire > nature > water | 1-3 |
 | fire+ / water+ / nature+ | 2 | 2 damage; beats a same-element basic for 1 | 4-6 |
 | drain | 1 | 1 damage + steals 1 mana (2 from a super charger); loses to any element; 2-round cooldown | d |
-| heal | 1 | +2 life (max 3), fizzles if hit; 1-round cooldown | h |
+| avatar | 3 | the Avatar State, once a game: 2 damage, beats every element and heal, breaks a shield for 1; a drain stops it (the avatar takes 1) | a |
+
+**Chaos.** From round 3 on, the world strikes now and then (a 1 in 4 chance a
+round, at least once by round 6, never two rounds running): the same for both
+players and never a hit. Each plays its own animation after the round, then
+what it does, and a banner in the pane names it:
+
+| Event | Effect |
+| --- | --- |
+| ❄ Blizzard | both drop to 0 mana |
+| ⚡ Lightning Storm | both at 3 mana |
+| 🌋 Volcano Eruption | fire, water and nature cost 0 for 2 rounds |
+| 🌑 Eclipse | the elements turn round, fire > water > nature > fire, for 2 rounds |
+| 🌧 Healing Rain | both +1 life |
+| 🌍 Earthquake | no shield that round |
+| 🌀 Time Rift | every cooldown is reset (the avatar stays used) |
+| 🌪 Tornado | the mana whirls together: both get the average, rounded up |
 
 At most one player is hit per round. At 0 life the other wins and the game's
 stats (rounds, how often each action was picked, ⚠ over 40%) go to the log;
@@ -62,7 +87,9 @@ In a terminal the pane draws the duel under a night sky: two pixel-art wizards
 in the ground, your own pick as an icon over your head (the other player sees a
 rune). Each round plays out: fireballs, torrents, ground vines and violet drains
 clash mid-stage (empowered ones blaze bigger), shields catch them, charges pull
-in mana, heals sparkle, the winning spell hits home. The last hit kills: the loser topples into a lot of blood, the winner
+in mana, heals sparkle, the winning spell hits home. An Avatar State first enters:
+a white flash, eyes and arrow tattoo ablaze, the wizard rising out of the ground
+rocks inside a sphere of water, fire, earth and air, then all four let go at once. The last hit kills: the loser topples into a lot of blood, the winner
 strikes a victory pose. Needs a truecolor terminal.
 
 `/coop` opens the pane, `/coop leave` leaves the room. The status line shows

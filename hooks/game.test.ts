@@ -1,13 +1,38 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Action, Duel, Player } from '../types'
-import { acceptSnapshot, applyIntent, beats, INITIAL_DUEL, isAction, isDuel, legal, seat, summary, whyNot, type HostState } from './game'
+import {
+  acceptSnapshot,
+  applyIntent,
+  beats,
+  CHAOS_EVENTS,
+  INITIAL_DUEL,
+  isAction,
+  isDuel,
+  legal,
+  maybeChaos,
+  OPTIONAL,
+  seat,
+  strike,
+  summary,
+  whyNot,
+  type HostState,
+} from './game'
 
-const start = (): HostState => {
+const seated = (): HostState => {
   let d = seat(INITIAL_DUEL, 'h', 'dani')!
   d = seat(d, 'g', 'caren')!
-  return { duel: d, picks: {} }
+  return { duel: d, picks: {}, loadouts: {} }
 }
+/** Both seated and ready, with every spell to hand: the duel rules on their own. */
+const start = (): HostState => {
+  const s = seated()
+  const players = Object.fromEntries(Object.entries(s.duel.players).map(([id, p]) => [id, { ...p, ready: true }]))
+  return { duel: { ...s.duel, players }, picks: {}, loadouts: { h: OPTIONAL, g: OPTIONAL } }
+}
+const choose = (s: HostState, id: string, spells: unknown) => applyIntent(s, id, { kind: 'loadout', spells })
+/** No chaos: the dice never come up. */
+const calm = () => 0.99
 const act = (s: HostState, id: string, action: string) => applyIntent(s, id, { kind: 'act', action })
 /** A state with both players changed by `over` (the same for both, or per id). */
 const withPlayers = (h: Partial<Player>, g: Partial<Player> = h): HostState => {
@@ -15,10 +40,10 @@ const withPlayers = (h: Partial<Player>, g: Partial<Player> = h): HostState => {
   const p = s.duel.players
   return { ...s, duel: { ...s.duel, players: { h: { ...p.h!, ...h }, g: { ...p.g!, ...g } } } }
 }
-const round = (s: HostState, h: Action, g: Action) => {
+const round = (s: HostState, h: Action, g: Action, rand = calm) => {
   const one = act(s, 'h', h)
   expect(one).not.toBe(null)
-  const two = act(one!, 'g', g)
+  const two = applyIntent(one!, 'g', { kind: 'act', action: g }, rand)
   expect(two).not.toBe(null)
   return two!
 }
@@ -32,8 +57,8 @@ test('elements: each beats exactly one', async () => {
   expect(beats('fire', 'fire')).toBe(false)
 })
 
-test('actions: the eleven picks, nothing else', async () => {
-  for (const a of ['charge', 'supercharge', 'shield', 'drain', 'heal', 'fire', 'water', 'nature', 'fire+', 'water+', 'nature+']) {
+test('actions: the twelve picks, nothing else', async () => {
+  for (const a of ['charge', 'supercharge', 'shield', 'drain', 'heal', 'avatar', 'fire', 'water', 'nature', 'fire+', 'water+', 'nature+']) {
     expect(isAction(a)).toBe(true)
   }
   expect(isAction('lava')).toBe(false)
@@ -41,16 +66,18 @@ test('actions: the eleven picks, nothing else', async () => {
   expect(isAction(3)).toBe(false)
 })
 
+const FRESH = { life: 3, mana: 1, picked: false, shieldCooldown: 0, drainCooldown: 0, superCooldown: 0, healCooldown: 0, avatarUsed: false, ready: false }
+
 test('seat: two players with 3 life and 1 mana, a third is refused, reseat is a no-op', async () => {
-  const s = start()
-  const fresh = { life: 3, mana: 1, picked: false, shieldLocked: false, drainCooldown: 0, superCooldown: 0, healCooldown: 0 }
+  const s = seated()
+  const fresh = FRESH
   expect(s.duel.players).toEqual({ h: { name: 'dani', ...fresh }, g: { name: 'caren', ...fresh } })
   expect(s.duel.seq).toBe(2)
   expect(seat(s.duel, 'x', 'eve')).toBe(null)
   expect(seat(s.duel, 'g', 'caren')).toBe(null)
 })
 
-test('legal: mana, charge cap, shield lock, drain cooldown, heal at full life', async () => {
+test('legal: mana, charge cap, shield cooldown, drain cooldown, heal at full life', async () => {
   const p = start().duel.players.h!
   expect(legal(p, 'charge')).toBe(true)
   expect(legal(p, 'shield')).toBe(true)
@@ -61,7 +88,7 @@ test('legal: mana, charge cap, shield lock, drain cooldown, heal at full life', 
   expect(legal({ ...p, mana: 0 }, 'fire')).toBe(false)
   expect(legal({ ...p, mana: 0 }, 'drain')).toBe(false)
   expect(legal({ ...p, mana: 3 }, 'charge')).toBe(false)
-  expect(legal({ ...p, shieldLocked: true }, 'shield')).toBe(false)
+  expect(legal({ ...p, shieldCooldown: 2 }, 'shield')).toBe(false)
   expect(legal({ ...p, drainCooldown: 1 }, 'drain')).toBe(false)
   expect(legal({ ...p, mana: 2 }, 'heal')).toBe(false)
   expect(legal({ ...p, mana: 1, life: 2 }, 'heal')).toBe(true)
@@ -77,7 +104,7 @@ test('whyNot: says why a pick is not allowed', async () => {
   expect(whyNot({ ...p, life: 2, healCooldown: 1 }, 'heal')).toBe('heal in 1')
   expect(whyNot({ ...p, mana: 2 }, 'heal')).toBe('life full')
   expect(whyNot({ ...p, mana: 3 }, 'charge')).toBe('mana full')
-  expect(whyNot({ ...p, shieldLocked: true }, 'shield')).toBe('shield locked')
+  expect(whyNot({ ...p, shieldCooldown: 2 }, 'shield')).toBe('shield in 2')
   expect(whyNot({ ...p, drainCooldown: 2 }, 'drain')).toBe('drain in 2')
   expect(whyNot({ ...p, superCooldown: 4 }, 'supercharge')).toBe('super in 4')
   expect(whyNot({ ...p, mana: 3 }, 'supercharge')).toBe('mana full')
@@ -168,13 +195,17 @@ test('drain blocked by a shield steals nothing', async () => {
   expect(s.duel.last).toMatchObject({ loser: null, stole: false })
 })
 
-test('shield lock: no shield the round after, back the round after that', async () => {
+test('shield cooldown: shield in round 1, out in rounds 2 and 3, back in round 4', async () => {
   let s = round(start(), 'shield', 'charge')
-  expect(s.duel.players.h?.shieldLocked).toBe(true)
-  expect(s.duel.players.g?.shieldLocked).toBe(false)
+  expect(s.duel.players.h?.shieldCooldown).toBe(2)
+  expect(s.duel.players.g?.shieldCooldown).toBe(0)
+  expect(act(s, 'h', 'shield')).toBe(null)
+  s = round(s, 'charge', 'shield')
+  expect(s.duel.players.h?.shieldCooldown).toBe(1)
   expect(act(s, 'h', 'shield')).toBe(null)
   s = round(s, 'charge', 'charge')
-  expect(s.duel.players.h?.shieldLocked).toBe(false)
+  expect(s.duel.round).toBe(4)
+  expect(s.duel.players.h?.shieldCooldown).toBe(0)
   expect(act(s, 'h', 'shield')).not.toBe(null)
 })
 
@@ -185,7 +216,7 @@ test('drain cooldown: out for two rounds whatever happened, back in the third', 
   s = round(s, 'charge', 'charge')
   expect(s.duel.players.h?.drainCooldown).toBe(1)
   expect(act(s, 'h', 'drain')).toBe(null)
-  s = round(s, 'shield', 'shield')
+  s = round(s, 'shield', 'fire')
   expect(s.duel.players.h?.drainCooldown).toBe(0)
   expect(act(s, 'h', 'drain')).not.toBe(null)
 })
@@ -228,7 +259,7 @@ test('rejects: unseated, bad action, junk', async () => {
 })
 
 test('life never goes below 0; death sets the winner, picks refused, rematch resets all', async () => {
-  let s = round(withPlayers({ life: 1, mana: 2, shieldLocked: true, drainCooldown: 2 }), 'charge', 'fire+')
+  let s = round(withPlayers({ life: 1, mana: 2, shieldCooldown: 2, drainCooldown: 2 }), 'charge', 'fire+')
   expect(s.duel.players.h?.life).toBe(0)
   expect(s.duel.winner).toBe('g')
   expect(act(s, 'g', 'charge')).toBe(null)
@@ -237,9 +268,11 @@ test('life never goes below 0; death sets the winner, picks refused, rematch res
   expect(again.duel.winner).toBe(undefined)
   expect(again.duel.last).toBe(undefined)
   expect(again.duel.round).toBe(1)
-  const fresh = { life: 3, mana: 1, picked: false, shieldLocked: false, drainCooldown: 0, superCooldown: 0, healCooldown: 0 }
-  expect(again.duel.players.h).toEqual({ name: 'dani', ...fresh })
-  expect(again.duel.players.g).toEqual({ name: 'caren', ...fresh })
+  expect(again.duel.players.h).toEqual({ name: 'dani', ...FRESH })
+  expect(again.duel.players.g).toEqual({ name: 'caren', ...FRESH })
+  // A new game: spells to choose again.
+  expect(again.loadouts).toEqual({})
+  expect(act(again, 'h', 'charge')).toBe(null)
 })
 
 test('rematch refused while the game is still on', async () => {
@@ -282,7 +315,7 @@ test('summary: winner, rounds, share of picks, overused and unused actions', asy
     tally: { charge: 5, fire: 3, shield: 2 },
   }
   expect(summary(d)).toBe(
-    'caren won in 5 rounds · charge 5 (50%) ⚠, fire 3 (30%), shield 2 (20%) · never: supercharge, drain, heal, water, nature, fire+, water+, nature+',
+    'caren won in 5 rounds · charge 5 (50%) ⚠, fire 3 (30%), shield 2 (20%) · never: supercharge, drain, heal, water, nature, fire+, water+, nature+, avatar',
   )
 })
 
@@ -305,7 +338,7 @@ test('super charge cooldown: out for five rounds, back in the sixth', async () =
     expect(act(s, 'h', 'supercharge')).toBe(null)
     s = round(s, 'shield', 'shield')
     expect(s.duel.players.h?.superCooldown).toBe(left)
-    s = { ...s, duel: { ...s.duel, players: Object.fromEntries(Object.entries(s.duel.players).map(([id, p]) => [id, { ...p, shieldLocked: false, mana: 0 }])) } }
+    s = { ...s, duel: { ...s.duel, players: Object.fromEntries(Object.entries(s.duel.players).map(([id, p]) => [id, { ...p, shieldCooldown: 0, mana: 0 }])) } }
   }
   expect(act(s, 'h', 'supercharge')).not.toBe(null)
 })
@@ -323,4 +356,211 @@ test('heal cooldown: not the round after, hit or not; back the round after that'
   s = round(s, 'charge', 'charge')
   expect(s.duel.players.h?.healCooldown).toBe(0)
   expect(act(s, 'h', 'heal')).not.toBe(null)
+})
+
+// ─── choosing spells ─────────────────────────────────────────────────────────
+
+test('loadout: three different optional spells, then ready; the choice stays on the host', async () => {
+  const s = choose(seated(), 'g', ['fire', 'drain', 'avatar'])!
+  expect(s.duel.players.g?.ready).toBe(true)
+  expect(s.duel.players.h?.ready).toBe(false)
+  expect(s.loadouts).toEqual({ g: ['fire', 'drain', 'avatar'] })
+  expect(JSON.stringify(s.duel)).not.toContain('avatar')
+  // Chosen once a game.
+  expect(choose(s, 'g', ['water', 'nature', 'fire+'])).toBe(null)
+})
+
+test('loadout: anything but three distinct optional spells is refused', async () => {
+  const s = seated()
+  for (const bad of [['fire', 'water'], ['fire', 'water', 'nature', 'drain'], ['fire', 'fire', 'water'], ['fire', 'water', 'shield'], ['fire', 'water', 'lava'], 'fire', null]) {
+    expect(choose(s, 'g', bad)).toBe(null)
+  }
+  expect(choose(s, 'x', ['fire', 'water', 'nature'])).toBe(null)
+})
+
+test('loadout: no casting until both are ready', async () => {
+  let s = seated()
+  expect(act(s, 'h', 'charge')).toBe(null)
+  s = choose(s, 'h', ['fire', 'water', 'nature'])!
+  expect(act(s, 'h', 'charge')).toBe(null)
+  s = choose(s, 'g', ['fire+', 'drain', 'supercharge'])!
+  expect(act(s, 'h', 'charge')).not.toBe(null)
+})
+
+test('loadout: the three basics and the three chosen, nothing else', async () => {
+  let s = choose(choose(seated(), 'h', ['fire', 'water', 'nature'])!, 'g', ['fire+', 'drain', 'supercharge'])!
+  for (const a of ['charge', 'shield', 'fire', 'water', 'nature'] as const) expect(act(s, 'h', a)).not.toBe(null)
+  expect(act(s, 'h', 'drain')).toBe(null)
+  expect(act(s, 'g', 'fire')).toBe(null)
+  expect(act(s, 'g', 'drain')).not.toBe(null)
+  const p = s.duel.players.h!
+  expect(whyNot(p, 'drain', { loadout: ['fire', 'water', 'nature'] })).toBe('not in your spells')
+  expect(whyNot({ ...p, life: 2 }, 'heal', { loadout: ['fire', 'water', 'nature'] })).toBe(null)
+})
+
+test('loadouts are revealed once the game is won, and in its summary', async () => {
+  let s = choose(choose(seated(), 'h', ['fire', 'water', 'nature'])!, 'g', ['fire+', 'drain', 'avatar'])!
+  s = { ...s, duel: { ...s.duel, players: { ...s.duel.players, h: { ...s.duel.players.h!, life: 1 }, g: { ...s.duel.players.g!, mana: 2 } } } }
+  s = round(s, 'charge', 'fire+')
+  expect(s.duel.winner).toBe('g')
+  expect(s.duel.loadouts).toEqual({ h: ['fire', 'water', 'nature'], g: ['fire+', 'drain', 'avatar'] })
+  expect(summary(s.duel)).toMatch(/dani: fire, water, nature · caren: fire\+, drain, avatar/)
+})
+
+// ─── the Avatar State ────────────────────────────────────────────────────────
+
+test('avatar: costs 3, once a game', async () => {
+  const p = start().duel.players.h!
+  expect(whyNot({ ...p, mana: 2 }, 'avatar')).toBe('needs 3 mana')
+  expect(whyNot({ ...p, mana: 3 }, 'avatar')).toBe(null)
+  expect(whyNot({ ...p, mana: 3, avatarUsed: true }, 'avatar')).toBe('used')
+  let s = round(withPlayers({ mana: 3 }), 'avatar', 'shield')
+  expect(s.duel.players.h?.avatarUsed).toBe(true)
+  expect(s.duel.players.h?.mana).toBe(0)
+  s = { ...s, duel: { ...s.duel, players: { ...s.duel.players, h: { ...s.duel.players.h!, mana: 3 } } } }
+  expect(act(s, 'h', 'avatar')).toBe(null)
+})
+
+// Avatar (host, 3 mana) against each answer (guest at 3 life, 2 mana): [guest action, host [life, mana], guest [life, mana]].
+const AVATAR: [Action, number[], number[]][] = [
+  ['charge', [3, 0], [1, 3]],
+  ['supercharge', [3, 0], [1, 3]],
+  ['heal', [3, 0], [1, 1]],
+  ['fire', [3, 0], [1, 1]],
+  ['water+', [3, 0], [1, 0]],
+  // Breaks through a shield, for 1.
+  ['shield', [3, 0], [2, 2]],
+  // A drain stops it: the avatar takes 1, with no mana left to steal.
+  ['drain', [2, 0], [3, 1]],
+  ['avatar', [3, 0], [3, 0]],
+]
+
+for (const [g, hx, gx] of AVATAR) {
+  test(`avatar vs ${g}`, async () => {
+    const both = withPlayers({ mana: 3 }, { life: g === 'heal' ? 2 : 3, mana: g === 'avatar' ? 3 : 2 })
+    const s = round(both, 'avatar', g)
+    expect(lm(s, 'h')).toEqual(hx)
+    expect(lm(s, 'g')).toEqual(g === 'heal' ? [0, 1] : gx)
+    const m = round({ ...both, duel: { ...both.duel, players: { h: { ...both.duel.players.g! }, g: { ...both.duel.players.h! } } } }, g, 'avatar')
+    expect(lm(m, 'g')).toEqual(hx)
+  })
+}
+
+test('avatar: at most one player hit, never a draw', async () => {
+  for (const [g] of AVATAR) {
+    const s = round(withPlayers({ mana: 3 }, { life: 2, mana: g === 'avatar' ? 3 : 2 }), 'avatar', g)
+    const hit = Object.values(s.duel.players).filter(p => p.life < (p.name === 'dani' ? 3 : 2))
+    expect(hit.length).toBeLessThanOrEqual(1)
+  }
+})
+
+// ─── chaos ───────────────────────────────────────────────────────────────────
+
+/** A duel at the start of `round`, nothing struck yet. */
+const at = (round: number, over: Partial<Duel> = {}): Duel => ({ ...start().duel, round, ...over })
+const dice = (...rolls: number[]) => () => rolls.shift() ?? 0.99
+
+test('chaos: never in the first two rounds', async () => {
+  expect(maybeChaos(at(1), dice(0, 0)).chaos).toBe(undefined)
+  expect(maybeChaos(at(2), dice(0, 0)).chaos).toBe(undefined)
+  expect(maybeChaos(at(3), dice(0, 0)).chaos).toMatchObject({ event: CHAOS_EVENTS[0], round: 3 })
+})
+
+test('chaos: by chance from round 3; for sure by round 6 if none struck yet', async () => {
+  expect(maybeChaos(at(3), dice(0.5)).chaos).toBe(undefined)
+  expect(maybeChaos(at(5), dice(0.5)).chaos).toBe(undefined)
+  expect(maybeChaos(at(6), dice(0)).chaos).toMatchObject({ event: CHAOS_EVENTS[0], round: 6 })
+  // Forced: no chance roll, only which event.
+  expect(maybeChaos(at(6), dice(0.99)).chaos?.event).toBe(CHAOS_EVENTS.at(-1))
+  // Once one struck, later ones stay chance: games with one, games with many.
+  expect(maybeChaos(at(9, { chaosCount: 1, chaos: { event: 'rain', round: 4, until: 4, before: {} } }), dice(0.5)).chaos?.round).toBe(4)
+  const again = maybeChaos(at(9, { chaosCount: 1, chaos: { event: 'rain', round: 4, until: 4, before: {} } }), dice(0.1, 0))
+  expect(again.chaos).toMatchObject({ event: CHAOS_EVENTS[0], round: 9 })
+  expect(again.chaosCount).toBe(2)
+})
+
+test('chaos: never two rounds in a row, never over a lasting one', async () => {
+  const rain = { event: 'rain' as const, round: 4, until: 4, before: {} }
+  expect(maybeChaos(at(5, { chaosCount: 1, chaos: rain }), dice(0, 0)).chaos).toBe(rain)
+  const eclipse = { event: 'eclipse' as const, round: 4, until: 5, before: {} }
+  expect(maybeChaos(at(6, { chaosCount: 1, chaos: eclipse }), dice(0, 0)).chaos).toBe(eclipse)
+  expect(maybeChaos(at(7, { chaosCount: 1, chaos: eclipse }), dice(0, 0)).chaos?.round).toBe(7)
+})
+
+test('chaos: strikes as a round resolves, and remembers life and mana from before', async () => {
+  let s = round(start(), 'charge', 'charge')
+  s = round(s, 'shield', 'shield', dice(0, CHAOS_EVENTS.indexOf('blizzard') / CHAOS_EVENTS.length))
+  expect(s.duel.round).toBe(3)
+  expect(s.duel.chaos).toEqual({ event: 'blizzard', round: 3, until: 3, before: { h: { life: 3, mana: 2 }, g: { life: 3, mana: 2 } } })
+  expect(lm(s, 'h')).toEqual([3, 0])
+  expect(lm(s, 'g')).toEqual([3, 0])
+})
+
+test('chaos: no event once the game is won', async () => {
+  const s = round(withPlayers({ life: 1, mana: 2 }), 'charge', 'fire+', dice(0, 0))
+  expect(s.duel.winner).toBe('g')
+  expect(s.duel.chaos).toBe(undefined)
+})
+
+const both = (d: Duel) => Object.values(d.players).map(p => [p.life, p.mana])
+
+test('chaos: every event hits both players alike', async () => {
+  const d = at(4, { players: { h: { ...start().duel.players.h!, life: 2, mana: 1, drainCooldown: 2, shieldCooldown: 1 }, g: { ...start().duel.players.g!, life: 3, mana: 2, superCooldown: 4 } } })
+  expect(both(strike(d, 'blizzard'))).toEqual([[2, 0], [3, 0]])
+  expect(both(strike(d, 'lightning'))).toEqual([[2, 3], [3, 3]])
+  expect(both(strike(d, 'rain'))).toEqual([[3, 1], [3, 2]])
+  // 1 + 2 mana, whirled together: 2 each.
+  expect(both(strike(d, 'tornado'))).toEqual([[2, 2], [3, 2]])
+  const rift = strike(d, 'rift')
+  for (const p of Object.values(rift.players)) {
+    expect([p.shieldCooldown, p.drainCooldown, p.superCooldown, p.healCooldown]).toEqual([0, 0, 0, 0])
+  }
+  for (const e of ['volcano', 'eclipse', 'quake'] as const) expect(both(strike(d, e))).toEqual(both(d))
+  // None of them ever deals damage.
+  for (const e of CHAOS_EVENTS) for (const p of Object.values(strike(d, e).players)) expect(p.life).toBeGreaterThan(0)
+})
+
+test('chaos: the avatar stays once a game, even through a time rift', async () => {
+  const d = at(4, { players: { h: { ...start().duel.players.h!, avatarUsed: true }, g: start().duel.players.g! } })
+  expect(strike(d, 'rift').players.h?.avatarUsed).toBe(true)
+})
+
+test('volcano: basic elements cost nothing for two rounds', async () => {
+  let s = { ...start(), duel: strike(at(4, { players: start().duel.players }), 'volcano') }
+  expect(s.duel.chaos).toMatchObject({ round: 4, until: 5 })
+  s = { ...s, duel: { ...s.duel, players: Object.fromEntries(Object.entries(s.duel.players).map(([id, p]) => [id, { ...p, mana: 0 }])) } }
+  expect(whyNot(s.duel.players.h!, 'fire', { duel: s.duel })).toBe(null)
+  expect(whyNot(s.duel.players.h!, 'fire+', { duel: s.duel })).toBe('needs 2 mana')
+  s = round(s, 'fire', 'water')
+  expect(lm(s, 'h')).toEqual([2, 0])
+  expect(lm(s, 'g')).toEqual([3, 0])
+  s = round(s, 'water', 'water')
+  expect(s.duel.round).toBe(6)
+  expect(whyNot(s.duel.players.h!, 'fire', { duel: s.duel })).toBe('needs 1 mana')
+})
+
+test('eclipse: elements beat each other the other way round', async () => {
+  expect(beats('fire', 'water', true)).toBe(true)
+  expect(beats('water', 'fire', true)).toBe(false)
+  const s = round({ ...start(), duel: strike(at(4, { players: withPlayers({ life: 2, mana: 2 }).duel.players }), 'eclipse') }, 'fire', 'water')
+  expect(lm(s, 'h')).toEqual([2, 1])
+  expect(lm(s, 'g')).toEqual([1, 1])
+})
+
+test('earthquake: no shield that round', async () => {
+  const d = strike(at(4), 'quake')
+  expect(whyNot(d.players.h!, 'shield', { duel: d })).toBe('earthquake')
+  expect(act({ ...start(), duel: d }, 'h', 'shield')).toBe(null)
+  const after = round({ ...start(), duel: d }, 'charge', 'charge')
+  expect(whyNot(after.duel.players.h!, 'shield', { duel: after.duel })).toBe(null)
+})
+
+test('chaos survives the wire, and a rematch clears it', async () => {
+  const d = strike(at(4), 'tornado')
+  expect(isDuel(d)).toBe(true)
+  expect(isDuel({ ...d, chaos: { event: 'meteor', round: 4, until: 4, before: {} } })).toBe(false)
+  const won = round(withPlayers({ life: 1, mana: 2 }), 'charge', 'fire+')
+  const again = applyIntent({ ...won, duel: { ...won.duel, chaos: d.chaos!, chaosCount: 1 } }, 'h', { kind: 'rematch' })!
+  expect(again.duel.chaos).toBe(undefined)
+  expect(again.duel.chaosCount).toBe(undefined)
 })

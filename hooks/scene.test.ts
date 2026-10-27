@@ -1,15 +1,19 @@
 import { expect, test } from 'claude-code/testing'
 
-import type { Action, Duel, Player } from '../types'
+import type { Action, ChaosEvent, Duel, Player } from '../types'
+import { CHAOS_EVENTS } from './game'
 import {
+  AVATAR_PRELUDE,
   CARD_COLS,
   CARD_PX_H,
+  CHAOS_MS,
   COLORS,
   GROUND_Y,
   SPRITES,
   SPRITE_TOP,
   STAGE_PX_H,
   drawCards,
+  drawDraft,
   drawStage,
   encodeCells,
   roundMs,
@@ -23,10 +27,12 @@ const P = (name: string, over: Partial<Player> = {}): Player => ({
   life: 3,
   mana: 1,
   picked: false,
-  shieldLocked: false,
+  shieldCooldown: 0,
   drainCooldown: 0,
   superCooldown: 0,
   healCooldown: 0,
+  avatarUsed: false,
+  ready: true,
   ...over,
 })
 
@@ -80,7 +86,7 @@ function bbox(px: Uint32Array, colors: number | readonly number[]) {
 const G = COLORS.guest
 const GUEST_BODY = [G.H, G.h, G.S, G.L, G.R, G.r]
 
-const view = (over: { me?: string; myPick?: Action; t?: number; now?: number } = {}) => ({ now: 0, ...over })
+const view = (over: { me?: string; myPick?: Action; t?: number; now?: number; chaosT?: number } = {}) => ({ now: 0, ...over })
 
 test('sprites are rectangular', async () => {
   for (const s of Object.values(SPRITES)) expect(new Set(s.map(r => r.length)).size).toBe(1)
@@ -228,7 +234,7 @@ test('super charge: twice the sparks of a charge', async () => {
 test('selection: an empowered pick shows its element icon; other picks a rune of their own', async () => {
   const d = duel({ players: { h: P('dani', { picked: true }), g: P('caren', { picked: true }) } })
   expect(has(drawStage(d, W, view({ me: 'g', myPick: 'water+' })), COLORS.icon.water, RIGHT)).toBe(true)
-  for (const a of ['charge', 'shield', 'drain', 'heal'] as const) {
+  for (const a of ['charge', 'shield', 'drain', 'heal', 'avatar'] as const) {
     const px = drawStage(d, W, view({ me: 'g', myPick: a }))
     expect(has(px, COLORS.pickIcon[a], RIGHT)).toBe(true)
   }
@@ -332,12 +338,12 @@ test('cards: a ready spell is drawn in its colors, and moves', async () => {
     expect(card(drawCards([act], P('dani', { life: 2 }), 0), 0, 1).some(c => c !== 0 && !gray(c))).toBe(true)
   }
   // Each its own drawing.
-  const looks = new Set((['charge', 'supercharge', 'shield', 'drain', 'heal', 'fire', 'fire+'] as const).map(a => drawCards([a], P('dani', { life: 2, mana: 2 }), 0).join()))
-  expect(looks.size).toBe(7)
+  const looks = new Set((['charge', 'supercharge', 'shield', 'drain', 'heal', 'fire', 'fire+', 'avatar'] as const).map(a => drawCards([a], P('dani', { life: 2, mana: 3 }), 0).join()))
+  expect(looks.size).toBe(8)
 })
 
 test('cards: what is not allowed is grey; a cooldown shows its rounds left in red', async () => {
-  const p = P('dani', { mana: 1, shieldLocked: true, drainCooldown: 2 })
+  const p = P('dani', { mana: 1, shieldCooldown: 2, drainCooldown: 2 })
   const px = drawCards(['fire+', 'shield', 'drain', 'fire'], p, 0)
   const [big, shield, drain, fire] = [0, 1, 2, 3].map(i => card(px, i, 4))
   expect(big!.every(c => c === 0 || gray(c) || c === COLORS.manaShort)).toBe(true)
@@ -356,4 +362,147 @@ test('cards: cost shown as mana pips, missing ones marked', async () => {
   expect(pips('fire', 1)).toEqual([2, 0])
   expect(pips('fire+', 2)).toEqual([4, 0])
   expect(pips('fire+', 1)).toEqual([0, 4])
+})
+
+test('cards: a volcano makes the basic elements free; a spell not chosen is grey', async () => {
+  const d = duel({ round: 4, chaos: { event: 'volcano', round: 4, until: 5, before: {} } })
+  const pips = (ctx: Parameters<typeof drawCards>[3]) =>
+    card(drawCards(['fire'], P('dani', { mana: 0 }), 0, ctx), 0, 1).filter(x => x === COLORS.mana || x === COLORS.manaShort).length
+  expect(pips({ duel: d })).toBe(0)
+  expect(pips({})).toBe(2)
+  const off = card(drawCards(['drain'], P('dani'), 0, { loadout: ['fire', 'water', 'nature'] }), 0, 1)
+  expect(off.every(c => c === 0 || gray(c))).toBe(true)
+})
+
+// ─── choosing spells ─────────────────────────────────────────────────────────
+
+test('draft: a card a cell, the chosen marked; once three are chosen the rest go grey', async () => {
+  const cell = 20
+  const cellPx = (px: Uint32Array, i: number) => {
+    const out: number[] = []
+    for (let y = 0; y < CARD_PX_H; y++) for (let x = i * cell; x < (i + 1) * cell; x++) out.push(px[y * 3 * cell + x]!)
+    return out
+  }
+  const px = drawDraft(['fire', 'water', 'nature'], ['water'], 0, cell)
+  expect(px.length).toBe(3 * cell * CARD_PX_H)
+  expect(cellPx(px, 1).includes(COLORS.chosen)).toBe(true)
+  expect(cellPx(px, 0).includes(COLORS.chosen)).toBe(false)
+  expect(cellPx(px, 0).some(c => c !== 0 && !gray(c))).toBe(true)
+  const full = drawDraft(['fire', 'water', 'nature'], ['water', 'drain', 'avatar'], 0, cell)
+  expect(cellPx(full, 0).every(c => c === 0 || gray(c))).toBe(true)
+  expect(cellPx(full, 1).some(c => c !== 0 && !gray(c))).toBe(true)
+})
+
+// ─── the Avatar State ────────────────────────────────────────────────────────
+
+test('avatar: enters the Avatar State first, the round waits for it', async () => {
+  const d = resolved('avatar', 'charge', 'g', 1, 2)
+  expect(roundMs(d)).toBe(roundMs(resolved('fire', 'charge', 'g', 1, 2)) + AVATAR_PRELUDE)
+  // Nothing flies yet, nobody bleeds.
+  const rising = drawStage(d, W, view({ t: AVATAR_PRELUDE - 200 }))
+  expect(has(rising, COLORS.blood)).toBe(false)
+  expect(has(rising, COLORS.heartLost)).toBe(false)
+})
+
+test('avatar: eyes and arrow tattoo aglow, rising inside a sphere of the four elements', async () => {
+  const d = resolved('avatar', 'charge', 'g', 1, 2)
+  const px = drawStage(d, W, view({ t: 1200 }))
+  expect(has(px, COLORS.avatar.eye, LEFT)).toBe(true)
+  expect(has(px, COLORS.avatar.arrow, LEFT)).toBe(true)
+  expect(has(px, COLORS.avatar.aura, LEFT)).toBe(true)
+  for (const col of COLORS.avatar.pal.slice(1)) expect(has(px, col, LEFT)).toBe(true)
+  // Lifted off the ground.
+  expect(bbox(px, COLORS.host.R).y0).toBeLessThan(bbox(drawStage(d, W, view()), COLORS.host.R).y0)
+  // At rest, none of it.
+  const idle = drawStage(d, W, view())
+  for (const col of [COLORS.avatar.eye, COLORS.avatar.arrow, COLORS.avatar.aura]) expect(has(idle, col)).toBe(false)
+})
+
+test('avatar: lets go a beam of all four elements', async () => {
+  const d = resolved('avatar', 'charge', 'g', 1, 2)
+  const px = drawStage(d, W, view({ t: AVATAR_PRELUDE + 1200 }))
+  const middle: Box = { ...ALL, x0: 16, x1: 48 }
+  for (const col of COLORS.avatar.pal) expect(has(px, col, middle)).toBe(true)
+})
+
+test('avatar: a drain stops it, the glow goes out and the avatar drops', async () => {
+  const d = resolved('avatar', 'drain', 'h', 2, 1)
+  const end = drawStage(d, W, view({ t: roundMs(d) - 50 }))
+  expect(has(end, COLORS.avatar.eye)).toBe(false)
+  expect(bbox(end, COLORS.host.R).y0).toBe(bbox(drawStage(d, W, view()), COLORS.host.R).y0)
+})
+
+test('avatar: breaks through a shield, the shielded one bleeds', async () => {
+  const d = resolved('avatar', 'shield', 'g', 2, 1)
+  const impact = drawStage(d, W, view({ t: roundMs(d) - 300 }))
+  expect(has(impact, [COLORS.hit, ...COLORS.blood], RIGHT)).toBe(true)
+  expect(has(impact, COLORS.heartLost, RIGHT)).toBe(true)
+})
+
+// ─── chaos ───────────────────────────────────────────────────────────────────
+
+/** Round 4, just struck by `event`: both went from 1 to 3 mana (whatever the event, for the stage). */
+const struck = (event: ChaosEvent, over: Partial<Duel> = {}): Duel =>
+  duel({
+    round: 4,
+    players: { h: P('dani', { mana: 3 }), g: P('caren', { mana: 3 }) },
+    chaos: { event, round: 4, until: event === 'volcano' || event === 'eclipse' ? 5 : 4, before: { h: { life: 3, mana: 1 }, g: { life: 3, mana: 1 } } },
+    chaosCount: 1,
+    ...over,
+  })
+
+test('chaos: every event has an animation of its own, the same on both screens', async () => {
+  const looks = new Set<string>()
+  for (const e of CHAOS_EVENTS) {
+    const d = struck(e)
+    const px = drawStage(d, W, view({ chaosT: 1500 }))
+    expect([...px].every(c => c !== 0)).toBe(true)
+    expect([...px]).toEqual([...drawStage(d, W, view({ chaosT: 1500 }))])
+    const frames = new Set([300, 1200, 2000, 2900, 3600].map(chaosT => drawStage(d, W, view({ chaosT })).join()))
+    expect(frames.size).toBeGreaterThan(3)
+    looks.add(px.join())
+  }
+  expect(looks.size).toBe(CHAOS_EVENTS.length)
+})
+
+test('chaos: mana changes on cue, once the world has struck', async () => {
+  const d = struck('lightning')
+  const underL: Box = { ...LEFT, y0: GROUND_Y + 1 }
+  expect(count(drawStage(d, W, view({ chaosT: 500 })), COLORS.gem[1], underL)).toBe(4)
+  expect(count(drawStage(d, W, view()), COLORS.gem[1], underL)).toBe(12)
+  // The round before it still plays with the old values.
+  const played = { ...d, last: { round: 3, picks: { h: 'shield', g: 'shield' }, loser: null, dmg: 0, stole: false, healed: {} } } satisfies Duel
+  expect(count(drawStage(played, W, view({ t: 500 })), COLORS.gem[1], underL)).toBe(4)
+})
+
+test('chaos: healing rain gives the heart back on cue', async () => {
+  const d = struck('rain', {
+    players: { h: P('dani', { life: 3 }), g: P('caren') },
+    chaos: { event: 'rain', round: 4, until: 4, before: { h: { life: 2, mana: 1 }, g: { life: 3, mana: 1 } } },
+  })
+  expect(count(drawStage(d, W, view({ chaosT: 500 })), COLORS.heartLost, LEFT)).toBe(6)
+  expect(count(drawStage(d, W, view()), COLORS.heartLost)).toBe(0)
+})
+
+test('chaos: nobody bleeds from it', async () => {
+  for (const e of CHAOS_EVENTS) {
+    for (const chaosT of [500, 1500, 2500, 3500]) expect(has(drawStage(struck(e), W, view({ chaosT })), [COLORS.hit, ...COLORS.blood])).toBe(false)
+  }
+})
+
+test('eclipse: the moon stays dark while it holds', async () => {
+  const d = struck('eclipse')
+  expect(has(drawStage(d, W, view()), COLORS.moon)).toBe(false)
+  expect(has(drawStage(d, W, view()), COLORS.chaos.corona)).toBe(true)
+  expect(has(drawStage(duel({ round: 6, chaos: d.chaos! }), W, view()), COLORS.moon)).toBe(true)
+})
+
+test('volcano: smokes on the horizon while it holds', async () => {
+  const d = struck('volcano')
+  expect(has(drawStage(d, W, view()), COLORS.chaos.rock)).toBe(true)
+  expect(has(drawStage(duel({ round: 6, chaos: d.chaos! }), W, view()), COLORS.chaos.rock)).toBe(false)
+})
+
+test('chaos runs a fixed length', async () => {
+  expect(CHAOS_MS).toBeGreaterThan(3000)
 })
