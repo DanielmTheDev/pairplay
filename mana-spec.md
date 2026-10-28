@@ -12,7 +12,7 @@ Design goal: **no dominant strategy**. Every action is beaten by some other acti
 
 ## Choosing spells
 
-- At the start of every game each player chooses **3 of the 9 optional spells**: Super charge, Drain, Fire, Water, Nature, Empowered Fire, Water and Nature, and the Avatar State. Charge, Shield and Heal are **basic**: everyone has them. So each player duels with 6 actions.
+- At the start of every game each player chooses **3 of the 9 optional spells**: Super charge, Drain, Fire, Water, Nature, Empowered Fire, Water and Nature, and the Avatar State. Pass, Charge, Shield and Heal are **basic**: everyone has them. So each player duels with 7 actions.
 - Both choose at the same time and in secret. The host keeps the choices; the other player only sees *ready*. Both sets are revealed once the game is won (and in its summary).
 - Round 1 starts once both are ready. The host rejects any action outside the caster's set. A rematch chooses again.
 
@@ -20,6 +20,7 @@ Design goal: **no dominant strategy**. Every action is beaten by some other acti
 
 | Action | Cost | Effect | Restriction |
 |---|---|---|---|
+| Pass | 0 | Nothing; takes any hit. So nobody is ever stuck with no legal action | — |
 | Charge | 0 | +1 mana | Illegal at 3 mana |
 | Super charge | 0 | +2 mana (capped at 3) | Illegal at 3 mana. 5-round cooldown |
 | Shield | 0 | Blocks all damage and mana theft this round | 2-round cooldown |

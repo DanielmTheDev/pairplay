@@ -5,7 +5,8 @@ export type Element = 'fire' | 'water' | 'nature'
 /** A basic spell, or `fire+` and the like: empowered. */
 export type Spell = Element | `${Element}+`
 
-export type Action = 'charge' | 'supercharge' | 'shield' | 'drain' | 'heal' | 'avatar' | Spell
+/** `pass`: does nothing, always allowed, so nobody is ever stuck. */
+export type Action = 'pass' | 'charge' | 'supercharge' | 'shield' | 'drain' | 'heal' | 'avatar' | Spell
 
 /** What the world throws at both players, now and then. */
 export type ChaosEvent = 'blizzard' | 'lightning' | 'volcano' | 'eclipse' | 'rain' | 'quake' | 'rift' | 'tornado'

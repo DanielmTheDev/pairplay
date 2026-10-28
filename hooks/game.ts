@@ -7,9 +7,9 @@ import type { Action, Chaos, ChaosEvent, Duel, Element, Player } from '../types'
 
 export const ELEMENTS: Element[] = ['fire', 'water', 'nature']
 const EMPOWERED = ELEMENTS.map(e => `${e}+` as const)
-export const ACTIONS: Action[] = ['charge', 'supercharge', 'shield', 'drain', 'heal', ...ELEMENTS, ...EMPOWERED, 'avatar']
+export const ACTIONS: Action[] = ['pass', 'charge', 'supercharge', 'shield', 'drain', 'heal', ...ELEMENTS, ...EMPOWERED, 'avatar']
 /** Every player has these, every game. */
-export const BASICS: Action[] = ['charge', 'shield', 'heal']
+export const BASICS: Action[] = ['pass', 'charge', 'shield', 'heal']
 /** The nine to choose from, in the order of the choosing grid. */
 export const OPTIONAL: Action[] = [...ELEMENTS, ...EMPOWERED, 'supercharge', 'drain', 'avatar']
 export const LOADOUT_SIZE = 3
@@ -28,6 +28,7 @@ export const OVERUSED = 0.4
 const BEATS: Record<Element, Element> = { water: 'fire', fire: 'nature', nature: 'water' }
 
 export const COST: Record<Action, number> = {
+  pass: 0,
   charge: 0,
   supercharge: 0,
   shield: 0,
@@ -44,6 +45,7 @@ export const COST: Record<Action, number> = {
 
 /** What each action does, short enough for the choosing grid. */
 export const DESCRIPTION: Record<Action, string> = {
+  pass: 'does nothing, takes any hit',
   charge: '+1 mana',
   supercharge: '+2 mana, then 5 rounds out',
   shield: 'blocks all damage and theft',
@@ -380,7 +382,7 @@ export function summary(duel: Duel) {
     const share = k / total
     return `${a} ${k} (${Math.round(share * 100)}%)${share > OVERUSED ? ' ⚠' : ''}`
   })
-  const never = ACTIONS.filter(a => !duel.tally?.[a])
+  const never = ACTIONS.filter(a => a !== 'pass' && !duel.tally?.[a])
   const winner = duel.winner ? duel.players[duel.winner]?.name : undefined
   const chosen = Object.entries(duel.loadouts ?? {}).map(([id, spells]) => `${duel.players[id]?.name ?? '?'}: ${spells.join(', ')}`)
   const chaos = duel.chaosCount ? [`${duel.chaosCount} chaos event${duel.chaosCount === 1 ? '' : 's'}`] : []

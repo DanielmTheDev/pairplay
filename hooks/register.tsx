@@ -21,19 +21,15 @@ import {
   seat,
   summary,
   whyNot,
-  type Ctx,
   type Intent,
 } from './game'
 import {
   CARD_COLS,
-  CARD_PX_H,
   CARD_ROWS,
   CHAOS_MS,
   FRAME_MS,
   STAGE_PX_H,
   STAGE_ROWS,
-  drawCards,
-  drawDraft,
   drawStage,
   encodeCells,
   roundMs,
@@ -55,10 +51,12 @@ import {
   subscribeUrl,
   type Envelope,
 } from './protocol'
+import type { CardsProps } from './cards'
 
 const PANE = 'pairplay'
 type Card = { action: Action; label: string; hotkey: string }
 // The pane's buttons, under their cards, each with its hotkey: moves, then spells.
+// Pass has no card: a plain button under them, for when nothing else is left.
 const BUTTONS: Card[] = [
   { action: 'charge', label: 'charge', hotkey: 'c' },
   { action: 'supercharge', label: 'super', hotkey: 'u' },
@@ -82,13 +80,8 @@ function cardRows(columns: number, loadout: readonly Action[] | null) {
   return Array.from({ length: Math.ceil(shown.length / per) }, (_, i) => shown.slice(i * per, (i + 1) * per))
 }
 
-/** Pane rows the duel needs besides the cards: header, round, stage, players, result, input, a little log. */
-const DUEL_ROWS = 2 + 1 + 1 + STAGE_ROWS + 2 + 1 + 1 + 3
-
-function cardCells(row: Card[], p: Player | undefined, now: number, ctx: Ctx) {
-  const cols = row.length * CARD_COLS
-  return encodeCells(drawCards(row.map(b => b.action), p, now, ctx), cols, CARD_PX_H)
-}
+/** Pane rows the duel needs besides the cards: header, round, stage, players, result, pass, input, a little log. */
+const DUEL_ROWS = 2 + 1 + 1 + STAGE_ROWS + 2 + 1 + 1 + 1 + 3
 
 /** The choosing grid: the nine optional spells, three by three. */
 const DRAFT_ROWS = [OPTIONAL.slice(0, 3), OPTIONAL.slice(3, 6), OPTIONAL.slice(6, 9)]
@@ -97,10 +90,6 @@ const DRAFT_PANE_ROWS = 2 + 1 + DRAFT_ROWS.length * (CARD_ROWS + 3) + 2
 
 function draftCell(columns: number) {
   return Math.max(CARD_COLS, Math.min(24, Math.floor(columns / 3)))
-}
-
-function draftCells(row: Action[], chosen: readonly Action[], now: number, cell: number) {
-  return encodeCells(drawDraft(row, chosen, now, cell), row.length * cell, CARD_PX_H)
 }
 
 const CHAOS_ICON: Record<ChaosEvent, string> = {
@@ -149,7 +138,7 @@ const HELP = [
   '/coop say <text>    chat (or type in the pane)',
   '/coop pick a b c    choose this game\'s 3 spells (or tick them in the pane):',
   `                    ${OPTIONAL.join(' ')}`,
-  '/coop <action>      charge | shield | heal, and your 3: supercharge | drain (1 mana)',
+  '/coop <action>      pass | charge | shield | heal, and your 3: supercharge | drain (1 mana)',
   '                    fire | water | nature (1), fire+ ... (2), avatar (3, once)',
   '/coop rematch       new duel after one is won',
   '/coop leave         leave the room',
@@ -356,6 +345,8 @@ async function onDuelChange($: $, before: Duel, after: Duel) {
   if (after.winner !== undefined && before.winner === undefined) {
     $.clock.after(roundMs(after), () => void quietly(() => addLog($, 'game', summary(after))))
   }
+  // Once the round has played: into the log, the game's history, and a notification.
+  $.clock.after(roundMs(after), () => void quietly(() => announce($, after)))
   const now = await $.clock.now()
   // Chaos that struck with this round plays once the round has.
   const ch = after.chaos
@@ -372,6 +363,14 @@ async function onDuelChange($: $, before: Duel, after: Duel) {
   anim = { t0: now }
   startLoop($)
   await tick($)
+}
+
+async function announce($: $, d: Duel) {
+  const text = roundText(d) + (d.winner !== undefined ? ` · ${nameOf(d, d.winner)} wins!` : '')
+  await addLog($, '⚔', text)
+  // No notification channel: a toast at least.
+  const sent = await $.ui.notify(text, { title: 'pairplay' }).catch(() => ({ isSent: false }))
+  if (!sent.isSent) $.ui.toast(text)
 }
 
 function startLoop($: $) {
@@ -428,19 +427,10 @@ async function tick($: $) {
     $.ui.invalidate('ui.render')
     return
   }
+  // The choosing grid has no stage; its cards, like the action cards, animate themselves.
+  if (shownDraft) return
   // Denied while the pane is closed: nothing to paint, the loop just idles.
-  if (shownDraft) {
-    const { cell } = shownDraft
-    const chosen = await read($, draft)
-    await Promise.all(DRAFT_ROWS.map((row, i) => $.ui.blit({ requestId: PANE, key: `draft-${i}`, cells: draftCells(row, chosen, view.now, cell) })))
-    return
-  }
   await $.ui.blit({ requestId: PANE, key: 'stage', cells: encodeCells(drawStage(d, stageCols, view), stageCols, STAGE_PX_H) })
-  if (d.winner === undefined) {
-    const p = d.players[me]
-    const ctx = { duel: d, loadout: await myLoadoutOf($) }
-    await Promise.all(shownCards.map((row, i) => $.ui.blit({ requestId: PANE, key: `cards-${i}`, cells: cardCells(row, p, view.now, ctx) })))
-  }
 }
 
 async function act($: $, intent: Intent) {
@@ -745,10 +735,22 @@ export const register: Register = (on, options) => {
     }
   })
 
+  // A click on a card (./cards.tsx): cast it, or on the choosing grid, tick it.
+  on('ui.message', async ($, e, next) => {
+    if (e.requestId !== PANE) return next(e)
+    const a = (e.data as { action?: unknown } | null)?.action
+    if (!isAction(a)) return {}
+    if (e.element.startsWith('draft-')) await toggle($, a)
+    else if (e.element.startsWith('cards-')) await act($, { kind: 'act', action: a })
+    return {}
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
     const Raster = 'Raster' in els ? els.Raster : undefined
+    // The clickable cards: a surface module of their own (./cards.tsx).
+    const Client = 'Client' in els ? els.Client : undefined
     // Mobile draws no field: chat there via /coop say.
     const Input = 'Input' in els ? els.Input : undefined
     const r = await read($, room)
@@ -768,14 +770,14 @@ export const register: Register = (on, options) => {
     const waitingFor = choosing || g.winner !== undefined ? undefined : Object.entries(g.players).find(([id, q]) => id !== me && !q.ready)?.[1]
     const chosen = await read($, draft)
     const cell = draftCell(e.props.bodyColumns)
-    shownDraft = choosing && Raster && (!e.viewport || e.viewport.rows >= DRAFT_PANE_ROWS) ? { cell } : undefined
+    shownDraft = choosing && Client && (!e.viewport || e.viewport.rows >= DRAFT_PANE_ROWS) ? { cell } : undefined
     const buttons = choosing || waitingFor ? [] : cardRows(e.props.bodyColumns, loadout)
     // Cards only where they fit: on a short pane the buttons alone, under the stage.
     const cardsFit = !e.viewport || e.viewport.rows >= DUEL_ROWS + buttons.length * (CARD_ROWS + 1)
-    shownCards = Raster && cardsFit ? buttons : []
+    shownCards = Client && cardsFit ? buttons : []
     const used = choosing
       ? DRAFT_PANE_ROWS + 4
-      : 8 + (Raster ? STAGE_ROWS + 1 : 0) + buttons.length * (shownCards.length ? CARD_ROWS + 1 : 1)
+      : 9 + (Raster ? STAGE_ROWS + 1 : 0) + buttons.length * (shownCards.length ? CARD_ROWS + 1 : 1)
     const rows = Math.max(3, (e.viewport?.rows ?? 24) - used)
     // Announced once the round that brought it has played.
     const banner = playing ? null : chaosBanner(g)
@@ -795,13 +797,19 @@ export const register: Register = (on, options) => {
             <Text bold>
               Choose {LOADOUT_SIZE} spells{' '}
               <Text dimColor>
-                · {chosen.length}/{LOADOUT_SIZE} · charge, shield and heal are always yours
+                · {chosen.length}/{LOADOUT_SIZE} · pass, charge, shield and heal are always yours
               </Text>
             </Text>
             {DRAFT_ROWS.map((row, i) => (
               <Box flexDirection="column">
-                {Raster && shownDraft && (
-                  <Raster key={`draft-${i}`} columns={row.length * cell} rows={CARD_ROWS} cells={draftCells(row, chosen, view.now, cell)} />
+                {Client && shownDraft && (
+                  <Client
+                    key={`draft-${i}`}
+                    module="./cards.tsx"
+                    width={row.length * cell}
+                    height={CARD_ROWS}
+                    props={{ kind: 'draft', actions: row, chosen, cell } satisfies CardsProps}
+                  />
                 )}
                 <Box flexDirection="row">
                   {row.map((a, j) => (
@@ -876,12 +884,22 @@ export const register: Register = (on, options) => {
             ) : (
               buttons.map((row, i) => (
                 <Box flexDirection="column">
-                  {Raster && shownCards.length > 0 && (
-                    <Raster
+                  {Client && shownCards.length > 0 && (
+                    <Client
                       key={`cards-${i}`}
-                      columns={row.length * CARD_COLS}
-                      rows={CARD_ROWS}
-                      cells={cardCells(row, you, view.now, ctx)}
+                      module="./cards.tsx"
+                      width={row.length * CARD_COLS}
+                      height={CARD_ROWS}
+                      props={
+                        {
+                          kind: 'cards',
+                          actions: row.map(b => b.action),
+                          player: you ?? null,
+                          duel: g,
+                          loadout,
+                          pressable: row.map(b => b.action).filter(a => you && legal(you, a, ctx)),
+                        } satisfies CardsProps
+                      }
                     />
                   )}
                   <Box flexDirection="row">
@@ -904,6 +922,9 @@ export const register: Register = (on, options) => {
                   </Box>
                 </Box>
               ))
+            )}
+            {!g.winner && buttons.length > 0 && (
+              <Button key="pass" label="pass" hotkey="p" plain onPress={() => void act($, { kind: 'act', action: 'pass' })} />
             )}
           </Box>
         )}

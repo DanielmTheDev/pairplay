@@ -57,8 +57,8 @@ test('elements: each beats exactly one', async () => {
   expect(beats('fire', 'fire')).toBe(false)
 })
 
-test('actions: the twelve picks, nothing else', async () => {
-  for (const a of ['charge', 'supercharge', 'shield', 'drain', 'heal', 'avatar', 'fire', 'water', 'nature', 'fire+', 'water+', 'nature+']) {
+test('actions: the thirteen picks, nothing else', async () => {
+  for (const a of ['pass', 'charge', 'supercharge', 'shield', 'drain', 'heal', 'avatar', 'fire', 'water', 'nature', 'fire+', 'water+', 'nature+']) {
     expect(isAction(a)).toBe(true)
   }
   expect(isAction('lava')).toBe(false)
@@ -109,6 +109,17 @@ test('whyNot: says why a pick is not allowed', async () => {
   expect(whyNot({ ...p, superCooldown: 4 }, 'supercharge')).toBe('super in 4')
   expect(whyNot({ ...p, mana: 3 }, 'supercharge')).toBe('mana full')
   expect(whyNot({ ...p, mana: 2 }, 'supercharge')).toBe(null)
+})
+
+test('pass: always allowed, even with nothing else left; does nothing, takes hits', async () => {
+  // Mana and life full, shield and drain cooling, avatar used, earthquake: stuck but for pass.
+  const stuck = { mana: 3, shieldCooldown: 1, drainCooldown: 1, superCooldown: 0, avatarUsed: true }
+  const loadout = ['supercharge', 'drain', 'avatar'] as Action[]
+  const p = { ...seated().duel.players.h!, ...stuck, ready: true }
+  expect(['charge', 'shield', 'heal', ...loadout].filter(a => legal(p, a as Action, { loadout }))).toEqual([])
+  expect(legal(p, 'pass', { loadout })).toBe(true)
+  expect(lm(round(withPlayers({ mana: 3 }, { mana: 2 }), 'pass', 'charge'), 'h')).toEqual([3, 3])
+  expect(lm(round(withPlayers({ mana: 3 }, { mana: 2 }), 'pass', 'fire'), 'h')).toEqual([2, 3])
 })
 
 test('host rejects an illegal intent', async () => {
@@ -365,7 +376,7 @@ test('loadout: three different optional spells, then ready; the choice stays on 
   expect(s.duel.players.g?.ready).toBe(true)
   expect(s.duel.players.h?.ready).toBe(false)
   expect(s.loadouts).toEqual({ g: ['fire', 'drain', 'avatar'] })
-  expect(JSON.stringify(s.duel)).not.toContain('avatar')
+  expect(JSON.stringify(s.duel)).not.toContain('"avatar"')
   // Chosen once a game.
   expect(choose(s, 'g', ['water', 'nature', 'fire+'])).toBe(null)
 })

@@ -56,7 +56,7 @@ export const COLORS = {
   shieldEdge: 0x4a9ad0,
   drain: [0xffd6ff, 0xd070ff, 0x9a30d8, 0x5a1590],
   healSpark: 0x9dffb0,
-  pickIcon: { charge: 0xffe94a, supercharge: 0xfff7b0, shield: 0x8ad8ff, drain: 0xb85cff, heal: 0x5cff8a, avatar: 0x9ff0ff },
+  pickIcon: { pass: 0xb8b8c8, charge: 0xffe94a, supercharge: 0xfff7b0, shield: 0x8ad8ff, drain: 0xb85cff, heal: 0x5cff8a, avatar: 0x9ff0ff },
   // The Avatar State: eyes and arrows ablaze, air, water, earth and fire at once.
   avatar: {
     eye: 0xf4ffff,
@@ -159,6 +159,7 @@ const ICONS: Record<Element, string[]> = {
 const RUNE = ['XXX', '..X', '.XX', '...', '.X.']
 // The viewer's own non-spell pick, over their head like an element icon.
 const PICK_ICONS: Record<Move, string[]> = {
+  pass: ['XXXXX', '.X.X.', '..X..', '.X.X.', 'XXXXX'],
   charge: ['..XX', '.XX.', 'XXXX', '.XX.', 'XX..'],
   supercharge: ['.XX.XX', 'XX.XX.', 'XXXXXX', '.XX.XX', 'XX.XX.'],
   shield: ['XXXXX', 'X...X', 'X...X', '.X.X.', '..X..'],
@@ -210,7 +211,7 @@ export function roundMs(duel: Duel) {
 type Canvas = { w: number; px: Uint32Array; ox: number; oy: number }
 type Pt = { x: number; y: number }
 type Side = 'host' | 'guest'
-type Move = 'charge' | 'supercharge' | 'shield' | 'drain' | 'heal' | 'avatar'
+type Move = 'pass' | 'charge' | 'supercharge' | 'shield' | 'drain' | 'heal' | 'avatar'
 /** What flies across the stage: an element, a drain, the Avatar State, or nothing. */
 type Shot = Element | 'drain' | 'avatar'
 
@@ -226,6 +227,7 @@ function palette(shot: Shot): readonly number[] {
 function orbColor(a: Action) {
   const shot = shotOf(a)
   if (shot) return palette(shot)[1]!
+  if (a === 'pass') return COLORS.pickIcon.pass
   return a === 'charge' || a === 'supercharge' ? COLORS.mana : a === 'shield' ? COLORS.shield : COLORS.healSpark
 }
 
@@ -1662,6 +1664,12 @@ function art(c: Canvas, a: Action, now: number) {
       put(c, cx, 3.5 + k, COLORS.pickIcon.heal)
     }
     put(c, cx, 3.5, COLORS.healSpark)
+  } else if (a === 'pass') {
+    // An hourglass, its sand running down.
+    const rows = ['XXXXX', '.X.X.', '..X..', '.X.X.', 'XXXXX']
+    const fall = Math.floor(now / 300) % 3
+    rows.forEach((row, y) => [...row].forEach((ch, x) => ch === 'X' && put(c, x + 2, y + 1, COLORS.pickIcon.pass)))
+    put(c, cx, 2 + fall, COLORS.pickIcon.charge)
   } else if (a === 'avatar') {
     // A glowing core with the four elements circling it.
     const pal = COLORS.avatar.pal

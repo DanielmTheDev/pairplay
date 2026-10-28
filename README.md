@@ -42,7 +42,7 @@ Mana duel (full rules: `mana-spec.md`). 3 life, start with 1 mana, cap 3.
 
 Every game starts with each player choosing, in secret, 3 of the 9 optional
 spells (a 3×3 grid of cards with cost and effect; start once three are ticked).
-Charge, shield and heal are always yours, so each player duels with 6 actions.
+Pass, charge, shield and heal are always yours, so each player duels with 7 actions.
 The other player only sees that you are ready; both sets are revealed when the
 game is won. A rematch chooses again.
 
@@ -50,6 +50,7 @@ Then both pick one action a round in secret (changeable until the other has pick
 
 | Action | Cost | Effect | Key |
 | --- | --- | --- | --- |
+| pass (basic) | 0 | nothing, takes any hit: for when no other move is left | p |
 | charge (basic) | 0 | +1 mana (not at 3) | c |
 | shield (basic) | 0 | blocks all damage and theft; 2-round cooldown (round 1 → back in round 4) | s |
 | heal (basic) | 1 | +2 life (max 3), fizzles if hit; 1-round cooldown | h |
@@ -75,7 +76,9 @@ what it does, and a banner in the pane names it:
 | 🌀 Time Rift | every cooldown is reset (the avatar stays used) |
 | 🌪 Tornado | the mana whirls together: both get the average, rounded up |
 
-At most one player is hit per round. At 0 life the other wins and the game's
+At most one player is hit per round. Each round, once it has played, goes to
+the log (the game's history) and raises a notification (a toast when no
+notification channel is set up). At 0 life the other wins and the game's
 stats (rounds, how often each action was picked, ⚠ over 40%) go to the log;
 `/coop rematch` starts over. The host's session is the referee: it holds the
 picks, rejects illegal ones, and decides every round. Each action has an
