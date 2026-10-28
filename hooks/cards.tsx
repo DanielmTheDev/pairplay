@@ -1,15 +1,16 @@
 // Surface module: a row of cards, drawn as half blocks and animated here, that a
 // click presses. A Raster takes no presses, so the cards are Text in a Client;
-// a press goes to the hooks module as a post, { action }.
+// a press goes to the hooks module as a post, { action }, or { rematch: true }.
+// The card under the pointer lights up: hover is the module's own state.
 
 import type { ClientModule } from 'claude-code'
 
 import type { Action, Duel, Player } from '../types'
-import { CARD_COLS, CARD_PX_H, FRAME_MS, drawCards, drawDraft } from './scene'
+import { CARD_COLS, CARD_PX_H, FRAME_MS, REMATCH_COLS, drawCards, drawRematch } from './scene'
 
 export type CardsProps =
-  | { kind: 'cards'; actions: Action[]; player: Player | null; duel: Duel; loadout: Action[] | null; pressable: Action[] }
-  | { kind: 'draft'; actions: Action[]; chosen: Action[]; cell: number }
+  | { kind: 'cards'; actions: Action[]; player: Player | null; duel: Duel; pressable: Action[] }
+  | { kind: 'rematch' }
 
 type Run = { text: string; fg?: string; bg?: string }
 
@@ -34,23 +35,41 @@ export function runs(px: Uint32Array, width: number): Run[][] {
   return out
 }
 
-const Cards: ClientModule<CardsProps, { t: number }> = (props, surface) => {
+/** The clock, moved on by the surface's frame clock, and the card under the pointer (-1: none). */
+type State = { t: number; hover: number }
+
+const Cards: ClientModule<CardsProps, State> = (props, surface) => {
   const { Box, Text } = surface.elements
   if (surface.state === undefined) {
-    surface.setState({ t: Date.now() })
-    surface.every(FRAME_MS, () => surface.setState({ t: Date.now() }))
+    surface.setState({ t: Date.now(), hover: -1 })
+    surface.every(FRAME_MS, () => {
+      const st = surface.state ?? { t: Date.now(), hover: -1 }
+      surface.setState({ ...st, t: st.t + FRAME_MS })
+    })
   }
-  const now = Date.now()
-  const cell = props.kind === 'draft' ? props.cell : CARD_COLS
-  const width = props.actions.length * cell
-  const px =
-    props.kind === 'cards'
-      ? drawCards(props.actions, props.player ?? undefined, now, { duel: props.duel, loadout: props.loadout })
-      : drawDraft(props.actions, props.chosen, now, props.cell)
+  const now = surface.state?.t ?? Date.now()
+  const hover = surface.state?.hover ?? -1
+  const rematch = props.kind === 'rematch'
+  const width = rematch ? REMATCH_COLS : props.actions.length * CARD_COLS
+  const px = rematch ? drawRematch(now, hover === 0) : drawCards(props.actions, props.player ?? undefined, now, { duel: props.duel }, hover)
+  const cardAt = (x: number) => (rematch ? (x >= 0 && x < REMATCH_COLS ? 0 : -1) : Math.floor(x / CARD_COLS))
   surface.onPointer(e => {
+    if (e.type === 'leave') {
+      if (hover !== -1) surface.setState({ t: now, hover: -1 })
+      return
+    }
+    if (e.type === 'move' || e.type === 'enter') {
+      const i = cardAt(e.x)
+      if (i !== hover) surface.setState({ t: now, hover: i })
+      return
+    }
     if (e.type !== 'down' || e.button !== 'left') return
-    const a = props.actions[Math.floor(e.x / cell)]
-    if (a && (props.kind === 'draft' || props.pressable.includes(a))) surface.post({ action: a })
+    if (rematch) {
+      if (cardAt(e.x) === 0) surface.post({ rematch: true })
+      return
+    }
+    const a = props.actions[cardAt(e.x)]
+    if (a && props.pressable.includes(a)) surface.post({ action: a })
   })
   return (
     <Box flexDirection="column">

@@ -5,7 +5,7 @@
 // A chaos event plays `view.chaosT` ms into its own animation, after the round.
 
 import type { Action, Duel, Element, Player } from '../types'
-import { COST, costOf, elementOf, holds, isEmpowered, LOADOUT_SIZE, MAX_MANA, whyNot, type Ctx } from './game'
+import { costOf, holds, isElement, MAX_MANA, needOf, whyNot, type Ctx } from './game'
 
 export const STAGE_ROWS = 16
 export const STAGE_PX_H = STAGE_ROWS * 2
@@ -28,6 +28,9 @@ const DEATH_END = 5200
 /** Ms an Avatar State takes to enter and rise, before the round plays. */
 export const AVATAR_PRELUDE = 1700
 const AVATAR_FLASH = 260
+/** Pixels an avatar floats off the ground, bobbing a pixel either way; how big its sphere stays. */
+const AVATAR_LIFT = 4
+const AVATAR_SPHERE = 0.8
 
 export const COLORS = {
   host: { H: 0x3355dd, h: 0xffdd33, S: 0xf2c9a0, E: 0x222222, B: 0xeeeeee, R: 0x2b44b8, r: 0x1c2f80, T: 0x8b5a2b, O: 0x99ddff },
@@ -56,7 +59,7 @@ export const COLORS = {
   shieldEdge: 0x4a9ad0,
   drain: [0xffd6ff, 0xd070ff, 0x9a30d8, 0x5a1590],
   healSpark: 0x9dffb0,
-  pickIcon: { pass: 0xb8b8c8, charge: 0xffe94a, supercharge: 0xfff7b0, shield: 0x8ad8ff, drain: 0xb85cff, heal: 0x5cff8a, avatar: 0x9ff0ff },
+  pickIcon: { pass: 0xb8b8c8, charge: 0xffe94a, shield: 0x8ad8ff, drain: 0xb85cff, heal: 0x5cff8a, avatar: 0x9ff0ff },
   // The Avatar State: eyes and arrows ablaze, air, water, earth and fire at once.
   avatar: {
     eye: 0xf4ffff,
@@ -68,7 +71,8 @@ export const COLORS = {
     earth: [0xb08a5a, 0x7a5a3a, 0x4a3422],
     sky: 0x0c1a44,
   },
-  chosen: 0x8affc0,
+  cardHover: 0xfff6d0,
+  cardLit: 0x2a2248,
   chaos: {
     snow: [0xffffff, 0xd8ecff],
     frost: 0xcfeaff,
@@ -161,7 +165,6 @@ const RUNE = ['XXX', '..X', '.XX', '...', '.X.']
 const PICK_ICONS: Record<Move, string[]> = {
   pass: ['XXXXX', '.X.X.', '..X..', '.X.X.', 'XXXXX'],
   charge: ['..XX', '.XX.', 'XXXX', '.XX.', 'XX..'],
-  supercharge: ['.XX.XX', 'XX.XX.', 'XXXXXX', '.XX.XX', 'XX.XX.'],
   shield: ['XXXXX', 'X...X', 'X...X', '.X.X.', '..X..'],
   drain: ['X...X', 'XX.XX', '.XXX.', '..X..'],
   heal: ['..X..', '..X..', 'XXXXX', '..X..', '..X..'],
@@ -211,16 +214,16 @@ export function roundMs(duel: Duel) {
 type Canvas = { w: number; px: Uint32Array; ox: number; oy: number }
 type Pt = { x: number; y: number }
 type Side = 'host' | 'guest'
-type Move = 'pass' | 'charge' | 'supercharge' | 'shield' | 'drain' | 'heal' | 'avatar'
-/** What flies across the stage: an element, a drain, the Avatar State, or nothing. */
-type Shot = Element | 'drain' | 'avatar'
+type Move = 'pass' | 'charge' | 'shield' | 'drain' | 'heal' | 'avatar'
+/** What flies across the stage: an element, a drain, or nothing. */
+type Shot = Element | 'drain'
 
 function shotOf(a: Action): Shot | null {
-  return elementOf(a) ?? (a === 'drain' || a === 'avatar' ? a : null)
+  return isElement(a) || a === 'drain' ? a : null
 }
 
 function palette(shot: Shot): readonly number[] {
-  return shot === 'drain' ? COLORS.drain : shot === 'avatar' ? COLORS.avatar.pal : COLORS.spell[shot]
+  return shot === 'drain' ? COLORS.drain : COLORS.spell[shot]
 }
 
 /** The staff orb's color while a round charges up. */
@@ -228,7 +231,8 @@ function orbColor(a: Action) {
   const shot = shotOf(a)
   if (shot) return palette(shot)[1]!
   if (a === 'pass') return COLORS.pickIcon.pass
-  return a === 'charge' || a === 'supercharge' ? COLORS.mana : a === 'shield' ? COLORS.shield : COLORS.healSpark
+  if (a === 'avatar') return COLORS.avatar.glow
+  return a === 'charge' ? COLORS.mana : a === 'shield' ? COLORS.shield : COLORS.healSpark
 }
 
 function put(c: Canvas, x: number, y: number, color: number) {
@@ -442,8 +446,7 @@ function icon(c: Canvas, el: Element, x0: number, y0: number) {
 }
 
 function pickIcon(c: Canvas, a: Action, x0: number, y0: number) {
-  const el = elementOf(a)
-  if (el) return icon(c, el, x0, y0)
+  if (isElement(a)) return icon(c, a, x0, y0)
   glyphs(c, PICK_ICONS[a as Move], x0, y0, COLORS.pickIcon[a as Move])
 }
 
@@ -595,13 +598,12 @@ function vine(c: Canvas, fromX: number, toX: number, t: number, seed: number) {
   put(c, toX + dir, GROUND_Y - 3, COLORS.thorn)
 }
 
-/** One spell in flight, its head at `head`; `from` is where it left the caster. Empowered ones blaze. */
+/** One spell in flight, its head at `head`; `from` is where it left the caster. An avatar's blaze. */
 function travel(c: Canvas, shot: Shot, from: Pt, head: Pt, t: number, seed: number, big = false) {
   const dir = Math.sign(head.x - from.x) || 1
   const pal = palette(shot)
   if (big) blob(c, head.x, head.y, 4.5 + Math.sin(t / 60) * 0.4, d => pal[d < 0.7 ? 2 : 3]!)
-  if (shot === 'avatar') avatarBeam(c, from, head, t, seed)
-  else if (shot === 'fire') fireball(c, head, dir, t, seed, big ? 3.2 : 2.6)
+  if (shot === 'fire') fireball(c, head, dir, t, seed, big ? 3.2 : 2.6)
   else if (shot === 'water') torrent(c, from, head, t, seed)
   else if (shot === 'nature') vine(c, from.x, head.x, t, seed)
   else {
@@ -612,7 +614,6 @@ function travel(c: Canvas, shot: Shot, from: Pt, head: Pt, t: number, seed: numb
 
 /** A charging staff, by what it is about to cast. */
 function windUp(c: Canvas, shot: Shot, tip: Pt, body: Pt, k: number, t: number, seed: number) {
-  if (shot === 'avatar') return
   if (shot !== 'drain') return charge(c, shot, tip, body, k, t, seed)
   blob(c, tip.x, tip.y, 0.8 + k * 1.4, d => COLORS.drain[d < 0.5 ? 0 : 1]!)
 }
@@ -631,24 +632,6 @@ function burst(c: Canvas, at: Pt, k: number, pals: (readonly number[])[], seed: 
     const y = at.y + Math.sin(ang) * v * k * 0.7 + 10 * k * k
     put(c, x, y, pick(pals[i % pals.length]!, 0.2 + k * 0.7))
   }
-}
-
-/** The Avatar State let go: four braided streams, fire, water, earth and air, round a white-hot core, widening as they go. */
-function avatarBeam(c: Canvas, from: Pt, head: Pt, t: number, seed: number) {
-  const { pal, earth, glow } = COLORS.avatar
-  const len = Math.abs(head.x - from.x)
-  const dir = Math.sign(head.x - from.x) || 1
-  for (let s = 0; s <= len; s++) {
-    const k = len ? s / len : 1
-    const x = from.x + dir * s
-    const y = lerp(from.y, head.y, k)
-    const width = 0.8 + k * 2.4
-    put(c, x, y, pal[0]!)
-    if (k > 0.3) put(c, x, y + (s % 2 ? 1 : -1), glow)
-    for (let j = 0; j < 4; j++) put(c, x, y + Math.sin(s * 0.45 - t / 45 + j * 1.57) * width, pal[1 + j]!)
-    if (rnd(seed, s, Math.floor(t / 90)) > 0.82) put(c, x, y + (rnd(seed, s, 7) - 0.5) * width * 2.6, earth[1 + (s % 2)]!)
-  }
-  blob(c, head.x, head.y, 3.8 + Math.sin(t / 40) * 0.5, d => (d < 0.4 ? pal[0]! : d < 0.65 ? glow : pal[1 + (Math.floor(d * 8 + t / 60) % 4)]!))
 }
 
 /** Behind the avatar: the sky goes deep blue, a white flash as it enters, light pouring out. */
@@ -730,16 +713,6 @@ function arrows(c: Canvas, side: Side, x0: number, top: number) {
 
 function impact(c: Canvas, shot: Shot, at: Pt, k: number, t: number, seed: number) {
   if (shot === 'drain') return burst(c, at, k, [COLORS.drain], seed)
-  if (shot === 'avatar') {
-    burst(c, at, k, [COLORS.spell.fire, COLORS.spell.water, COLORS.avatar.earth, [COLORS.avatar.pal[4]!, 0xffffff]], seed)
-    // Rocks flung out, falling back down.
-    for (let i = 0; i < 8; i++) {
-      const ang = rnd(seed, i, 195) * Math.PI * 2
-      const v = 6 + rnd(seed, i, 196) * 7
-      blob(c, at.x + Math.cos(ang) * v * k, at.y + Math.sin(ang) * v * k * 0.7 + 12 * k * k, 0.8, d => COLORS.avatar.earth[d < 0.5 ? 0 : 1]!)
-    }
-    return
-  }
   const el = shot
   const pal = COLORS.spell[el]
   if (el === 'fire') {
@@ -886,16 +859,23 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
   const tt = playing ? t : deadSide ? DEATH_END : undefined
   const clock = playing ? t : view.now
   const roundEnd = roundMs(duel) - prelude
-  const inAvatar = (side: Side) => playing && !!id[side] && last.picks[id[side]!] === 'avatar'
-  /** How far the avatar floats: up as it enters, down when a drain stops it or the round is done. */
+  /** Entering the Avatar State this round. */
+  const entering = (side: Side) => playing && !!id[side] && last.picks[id[side]!] === 'avatar'
+  /** In it through this round, and whether it ends with the round. */
+  const holding = (side: Side) => playing && !!id[side] && last.buffed.includes(id[side]!)
+  const ending = (side: Side) => holding(side) && duel.players[id[side]!]!.avatarRounds === 0
+  const inAvatar = (side: Side) =>
+    !!id[side] && side !== deadSide && (entering(side) || holding(side) || (!playing && duel.players[id[side]!]!.avatarRounds > 0))
+  /** How far the avatar floats, bobbing softly: up as it enters, down once its last round is done. */
   const lift = (side: Side) => {
     if (!inAvatar(side)) return 0
-    if (pre) return -Math.round(5 * phase(pt, 200, 1100))
-    const down = side === loser ? phase(t!, PUSH_END, PUSH_END + 200) : phase(t!, roundEnd - 600, roundEnd - 100)
-    return -Math.round(5 * (1 - down))
+    const hover = AVATAR_LIFT + Math.round(Math.sin(view.now / 450))
+    if (pre && entering(side)) return -Math.round(hover * phase(pt, 200, 1100))
+    if (ending(side)) return -Math.round(hover * (1 - phase(t!, roundEnd - 600, roundEnd - 100)))
+    return -hover
   }
-  /** Eyes and arrows ablaze: from the flash on, until it is stopped or comes down. */
-  const ablaze = (side: Side) => inAvatar(side) && (pre ? pt >= AVATAR_FLASH : side === loser ? t! < PUSH_END : t! < roundEnd - 300)
+  /** Eyes and arrows ablaze: from the flash on, until its last round comes down. */
+  const ablaze = (side: Side) => inAvatar(side) && (pre && entering(side) ? pt >= AVATAR_FLASH : !ending(side) || t! < roundEnd - 300)
 
   const flash = playing && clash && t >= TRAVEL_END && t < TRAVEL_END + 100 ? 0.45 : 0
   backdrop(c, view.now, flash)
@@ -912,8 +892,8 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
   }
 
   const quaking = struck?.event === 'quake' && ct !== undefined && ct > 300 && ct < CHAOS_EFFECT
-  const entering = pre && pt > 300 && pt < 1100
-  const shaking = quaking || entering || (playing && ((clash && t >= TRAVEL_END && t < CLASH_END) || (loser && t >= PUSH_END && t < PUSH_END + 260)))
+  const rising = pre && pt > 300 && pt < 1100
+  const shaking = quaking || rising || (playing && ((clash && t >= TRAVEL_END && t < CLASH_END) || (loser && t >= PUSH_END && t < PUSH_END + 260)))
   const shakeT = (pre ? pt : playing ? t : ct) ?? 0
   const shake = () => {
     if (shaking) {
@@ -964,13 +944,13 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
       const glow = ablaze(side)
       const top = SPRITE_TOP + hop + up
       const centre = { x: body(side).x, y: body(side).y + up - 1 }
-      const formed = !inAvatar(side) ? 0 : pre ? phase(pt, 250, 900) : 1 - phase(t!, 0, CHARGE_END)
+      const formed = !inAvatar(side) ? 0 : pre && entering(side) ? phase(pt, 250, 900) : AVATAR_SPHERE
       if (glow) {
-        if (pre) {
+        if (pre && entering(side)) {
           avatarRays(c, centre, phase(pt, AVATAR_FLASH, 700), pt)
           risingRocks(c, body(side).x, pt, seed)
         }
-        avatarSphere(c, centre, formed, pt, seed, false)
+        avatarSphere(c, centre, formed, view.now, seed, false)
         auraOutline(c, side, xs[side], top, COLORS.avatar.aura)
       }
       wizard(c, side, xs[side], {
@@ -983,7 +963,7 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
       })
       if (glow) {
         arrows(c, side, xs[side], top)
-        avatarSphere(c, centre, formed, pt, seed, true)
+        avatarSphere(c, centre, formed, view.now, seed, true)
       }
     }
     if (victorious) {
@@ -1009,22 +989,18 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
   if (playing && !pre && id.host && id.guest) {
     const midX = width / 2
     const midY = SPRITE_TOP + 6
-    const start = (side: Side): Pt =>
-      shot(side) === 'nature'
-        ? { x: body(side).x + dirOf(side) * 6, y: GROUND_Y - 1 }
-        : shot(side) === 'avatar'
-          ? { x: body(side).x + dirOf(side) * 5, y: body(side).y + lift(side) - 1 }
-          : tips[side]
+    /** The staff's tip, where it floats. */
+    const tip = (side: Side): Pt => ({ x: tips[side].x, y: tips[side].y + lift(side) })
+    const start = (side: Side): Pt => (shot(side) === 'nature' ? { x: body(side).x + dirOf(side) * 6, y: GROUND_Y - 1 } : tip(side))
     const meet = (side: Side): Pt => (shot(side) === 'nature' ? { x: midX - dirOf(side), y: GROUND_Y - 1 } : { x: midX - dirOf(side) * 2, y: midY })
     const aimAt = (win: Side, side: Side): Pt => (shot(win) === 'nature' ? { x: body(side).x, y: GROUND_Y - 1 } : body(side))
     const wallX = (side: Side) => body(side).x + dirOf(side) * 8
-    const fly = (side: Side, from: Pt, head: Pt, s: number) => travel(c, shot(side)!, from, head, t, s, isEmpowered(action(side)))
+    const fly = (side: Side, from: Pt, head: Pt, s: number) => travel(c, shot(side)!, from, head, t, s, holding(side))
 
     // What each wizard does for themselves: charge up, raise a shield, heal.
     for (const side of ['host', 'guest'] as const) {
       const a = action(side)
-      if (a === 'charge' && t < CLASH_END) manaSparks(c, body(side), phase(t, 0, CLASH_END), t)
-      if (a === 'supercharge' && t < CLASH_END) manaSparks(c, body(side), phase(t, 0, CLASH_END), t, 24)
+      if (a === 'charge' && t < CLASH_END) manaSparks(c, body(side), phase(t, 0, CLASH_END), t, holding(side) ? 24 : undefined)
       if (a === 'shield' && t >= CHARGE_END / 2) shieldWall(c, wallX(side), dirOf(side), phase(t, CHARGE_END / 2, CHARGE_END * 2), t)
       if (healed(side) && t >= CHARGE_END && t < TIE_END) {
         healSparks(c, body(side), phase(t, CHARGE_END, TIE_END), seed + (side === 'host' ? 5 : 6))
@@ -1054,7 +1030,7 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
     }
 
     if (t < CHARGE_END) {
-      for (const side of shooters) windUp(c, shot(side)!, tips[side], body(side), t / CHARGE_END, t, seed)
+      for (const side of shooters) windUp(c, shot(side)!, tip(side), body(side), t / CHARGE_END, t, seed)
     } else if (clash) {
       if (t < TRAVEL_END) {
         const k = phase(t, CHARGE_END, TRAVEL_END)
@@ -1090,7 +1066,6 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
       // Nothing to clash with: the shot flies the whole way, to a shield or a body.
       const win = shooters[0]!
       const side = other(win)
-      // The Avatar State breaks through a shield.
       const blocked = action(side) === 'shield' && side !== loser
       const from = start(win)
       const end = blocked ? { x: wallX(side), y: shot(win) === 'nature' ? GROUND_Y - 1 : midY } : aimAt(win, side)
@@ -1494,19 +1469,42 @@ export const CARD_ROWS = 5
 export const CARD_PX_H = CARD_ROWS * 2
 const CARD_W = CARD_COLS - 1
 
-/** A card's face at the canvas offset: frame, drawing, cost as mana pips (red ones short of it). */
-function face(c: Canvas, a: Action, now: number, edge: number, cost: number, short: boolean) {
+/**
+ * A card's face at the canvas offset: frame, drawing, cost as mana pips (red ones short of it),
+ * and past the cost, dim pips for mana it needs but does not spend.
+ */
+function face(c: Canvas, a: Action, now: number, edge: number, cost: number, need: number, short: boolean, big = false, lit = false) {
   for (let y = 0; y < CARD_PX_H; y++) {
     for (let x = 0; x < CARD_W; x++) {
       const corner = (x === 0 || x === CARD_W - 1) && (y === 0 || y === CARD_PX_H - 1)
-      if (!corner) put(c, x, y, x === 0 || y === 0 || x === CARD_W - 1 || y === CARD_PX_H - 1 ? edge : COLORS.card)
+      if (!corner) put(c, x, y, x === 0 || y === 0 || x === CARD_W - 1 || y === CARD_PX_H - 1 ? edge : lit ? COLORS.cardLit : COLORS.card)
     }
   }
-  art(c, a, now)
-  for (let k = 0; k < cost; k++) for (let y = 7; y <= 8; y++) put(c, 2 + k * 2, y, short ? COLORS.manaShort : COLORS.mana)
+  art(c, a, now, big)
+  for (let k = 0; k < Math.max(cost, need); k++) {
+    for (let y = 7; y <= 8; y++) put(c, 2 + k * 2, y, short ? COLORS.manaShort : k < cost ? COLORS.mana : COLORS.gemGlow)
+  }
 }
 
-const edgeOf = (a: Action) => (isEmpowered(a) || a === 'avatar' ? COLORS.cardGold : COLORS.cardEdge)
+const edgeOf = (a: Action, big: boolean) => (big || a === 'avatar' ? COLORS.cardGold : COLORS.cardEdge)
+
+/** A card the Avatar State makes stronger: the elements and charge. */
+const boosted = (a: Action, p: Player | undefined) => !!p && p.avatarRounds > 0 && (isElement(a) || a === 'charge')
+
+/** The card under the pointer, `width` wide: a bright edge, sparks running round it. */
+function hoverRing(c: Canvas, now: number, width = CARD_W) {
+  const ring: Pt[] = []
+  for (let x = 1; x < width - 1; x++) ring.push({ x, y: 0 })
+  for (let y = 1; y < CARD_PX_H - 1; y++) ring.push({ x: width - 1, y })
+  for (let x = width - 2; x > 0; x--) ring.push({ x, y: CARD_PX_H - 1 })
+  for (let y = CARD_PX_H - 2; y > 0; y--) ring.push({ x: 0, y })
+  ring.forEach(q => put(c, q.x, q.y, COLORS.cardHover))
+  const head = Math.floor(now / 40) % ring.length
+  for (let i = 0; i < 3; i++) {
+    const q = ring[(head + i * Math.floor(ring.length / 3)) % ring.length]!
+    put(c, q.x, q.y, 0xffffff)
+  }
+}
 
 /** Greys a card's pixels, `x0` to `x0 + CARD_W`, keeping the red of a missing mana. */
 function greyOut(px: Uint32Array, w: number, x0: number) {
@@ -1522,14 +1520,19 @@ function greyOut(px: Uint32Array, w: number, x0: number) {
 /**
  * The pane's action cards: a little animated drawing each, cost as mana pips.
  * What `p` may not pick is grey, with the rounds left in red when on cooldown.
+ * The card at `hovered` (under the pointer) lights up and plays faster, when it may be picked.
  */
-export function drawCards(actions: Action[], p: Player | undefined, now: number, ctx: Ctx = {}): Uint32Array {
+export function drawCards(actions: Action[], p: Player | undefined, now: number, ctx: Ctx = {}, hovered = -1): Uint32Array {
   const w = actions.length * CARD_COLS
   const px = new Uint32Array(w * CARD_PX_H)
   actions.forEach((a, i) => {
     const c: Canvas = { w, px, ox: i * CARD_COLS, oy: 0 }
     const why = p ? whyNot(p, a, ctx) : 'not seated'
-    face(c, a, now + i * 137, edgeOf(a), costOf(a, ctx.duel), !!why?.startsWith('needs'))
+    const big = boosted(a, p)
+    const lit = i === hovered && !why
+    const t = lit ? now * 2 : now
+    face(c, a, t + i * 137, edgeOf(a, big), costOf(a, ctx.duel), needOf(a, ctx.duel), !!why?.startsWith('needs'), big, lit)
+    if (lit) hoverRing(c, now)
     if (why) {
       greyOut(px, w, i * CARD_COLS)
       const left = cooldownOf(p, a)
@@ -1539,22 +1542,38 @@ export function drawCards(actions: Action[], p: Player | undefined, now: number,
   return px
 }
 
-/**
- * The choosing grid's row: a card centred in each `cell` columns, the chosen ones
- * edged and ticked; once the hand is full, the rest go grey.
- */
-export function drawDraft(actions: Action[], chosen: readonly Action[], now: number, cell: number): Uint32Array {
-  const w = actions.length * cell
+/** The rematch card, wider than an action card: two staffs crossed, their orbs flaring, sparks where they meet. */
+export const REMATCH_COLS = 2 * CARD_COLS - 1
+
+export function drawRematch(now: number, hovered = false): Uint32Array {
+  const w = REMATCH_COLS
   const px = new Uint32Array(w * CARD_PX_H)
-  actions.forEach((a, i) => {
-    const x0 = i * cell + Math.max(0, Math.floor((cell - CARD_COLS) / 2))
-    const c: Canvas = { w, px, ox: x0, oy: 0 }
-    const on = chosen.includes(a)
-    face(c, a, now + i * 137, on ? COLORS.chosen : edgeOf(a), COST[a], false)
-    // A tick in the corner.
-    if (on) for (const [x, y] of [[5, 2], [6, 3], [7, 2], [8, 1]] as const) put(c, x - 1, y - 1, COLORS.chosen)
-    else if (chosen.length >= LOADOUT_SIZE) greyOut(px, w, x0)
-  })
+  const c: Canvas = { w, px, ox: 0, oy: 0 }
+  const right = w - 1
+  for (let y = 0; y < CARD_PX_H; y++) {
+    for (let x = 0; x <= right; x++) {
+      const corner = (x === 0 || x === right) && (y === 0 || y === CARD_PX_H - 1)
+      if (!corner) put(c, x, y, x === 0 || y === 0 || x === right || y === CARD_PX_H - 1 ? COLORS.cardGold : hovered ? COLORS.cardLit : COLORS.card)
+    }
+  }
+  const t = hovered ? now * 2 : now
+  const mid = w / 2
+  // The staffs sway in, cross, and part again.
+  const sway = Math.round(Math.sin(t / 260))
+  for (let y = 2; y <= 8; y++) {
+    put(c, mid - 4 + (y - 2) + sway, y, COLORS.host.T)
+    put(c, mid + 3 - (y - 2) - sway, y, COLORS.guest.T)
+  }
+  const glow = (Math.sin(t / 180) + 1) / 2
+  blob(c, mid - 4 + sway, 1.6, 0.8 + glow * 0.5, d => (d < 0.5 ? 0xffffff : COLORS.host.O))
+  blob(c, mid + 3 - sway, 1.6, 1.3 - glow * 0.5, d => (d < 0.5 ? 0xffffff : COLORS.guest.O))
+  // Sparks fly from the crossing.
+  for (let i = 0; i < 6; i++) {
+    const k = (t / 500 + i / 6) % 1
+    const ang = rnd(i, Math.floor(t / 500 + i / 6), 211) * Math.PI * 2
+    put(c, mid - 0.5 + Math.cos(ang) * k * 5, 4.5 + Math.sin(ang) * k * 3, COLORS.spark[i % 2]!)
+  }
+  if (hovered) hoverRing(c, now, w)
   return px
 }
 
@@ -1568,12 +1587,12 @@ function cooldownOf(p: Player | undefined, a: Action) {
   if (!p) return 0
   if (a === 'shield') return p.shieldCooldown
   if (a === 'drain') return p.drainCooldown
-  if (a === 'supercharge') return p.superCooldown
   if (a === 'heal') return p.healCooldown
+  if (a === 'avatar') return p.avatarCooldown
   return 0
 }
 
-/** An empowered card's ring of motes, circling its drawing. */
+/** A card the Avatar State boosts: a ring of motes, circling its drawing. */
 function aura(c: Canvas, pal: readonly number[], now: number) {
   for (let i = 0; i < 8; i++) {
     const ang = now / 260 + (i / 8) * Math.PI * 2
@@ -1581,10 +1600,9 @@ function aura(c: Canvas, pal: readonly number[], now: number) {
   }
 }
 
-/** The drawing on a card, inside x 1..7, y 1..6; animated by `now`. */
-function art(c: Canvas, a: Action, now: number) {
-  const el = elementOf(a)
-  const big = isEmpowered(a)
+/** The drawing on a card, inside x 1..7, y 1..6; animated by `now`; `big`, boosted by the Avatar State. */
+function art(c: Canvas, a: Action, now: number, big = false) {
+  const el = isElement(a) ? a : undefined
   const cx = 4
   if (el === 'fire') {
     const pal = COLORS.spell.fire
@@ -1626,13 +1644,14 @@ function art(c: Canvas, a: Action, now: number) {
     put(c, rx - 1, 4, pal[2]!)
     put(c, rx + 1, 3, pal[1]!)
     put(c, cx + Math.round(sway), 1, Math.sin(now / 400) > 0 ? COLORS.petal : pal[0]!)
-  } else if (a === 'charge' || a === 'supercharge') {
+  } else if (a === 'charge') {
     const on = Math.sin(now / 150) > -0.4
     const bolt = (x0: number) =>
       ['..X', '.X.', 'XXX', '.X.', 'X..', 'X..'].forEach((row, y) =>
         [...row].forEach((ch, x) => ch === 'X' && put(c, x0 + x, y + 1, on ? COLORS.pickIcon.charge : COLORS.spark[0]!)),
       )
-    if (a === 'supercharge') {
+    // Boosted: two bolts in a glow, +2 mana.
+    if (big) {
       blob(c, cx, 3.5, 3 + Math.sin(now / 200) * 0.6, () => COLORS.gemGlow)
       bolt(1)
       bolt(5)
@@ -1671,12 +1690,19 @@ function art(c: Canvas, a: Action, now: number) {
     rows.forEach((row, y) => [...row].forEach((ch, x) => ch === 'X' && put(c, x + 2, y + 1, COLORS.pickIcon.pass)))
     put(c, cx, 2 + fall, COLORS.pickIcon.charge)
   } else if (a === 'avatar') {
-    // A glowing core with the four elements circling it.
+    // Two glowing eyes over the arrow, the four elements circling.
     const pal = COLORS.avatar.pal
-    blob(c, cx, 3.5, 1.2 + Math.sin(now / 160) * 0.4, d => (d < 0.5 ? pal[0]! : COLORS.avatar.glow))
+    const shut = Math.floor(now / 2600) % 4 === 3 && now % 2600 < 140
+    for (const ex of [cx - 1.5, cx + 1.5]) {
+      if (shut) put(c, ex, 2.5, COLORS.avatar.aura)
+      else blob(c, ex, 2.5, 0.7 + Math.sin(now / 160) * 0.25, d => (d < 0.5 ? COLORS.avatar.eye : COLORS.avatar.glow))
+    }
+    for (let y = 4; y <= 5; y++) put(c, cx, y, COLORS.avatar.arrow)
+    put(c, cx - 1, 4, COLORS.avatar.arrow)
+    put(c, cx + 1, 4, COLORS.avatar.arrow)
     for (let i = 0; i < 4; i++) {
       const ang = now / 220 + (i / 4) * Math.PI * 2
-      put(c, cx + Math.cos(ang) * 3, 3.5 + Math.sin(ang) * 2.6, pal[1 + i]!)
+      put(c, cx + Math.cos(ang) * 3.4, 3.5 + Math.sin(ang) * 2.8, pal[1 + i]!)
     }
   }
 }

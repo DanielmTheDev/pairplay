@@ -1,27 +1,22 @@
 // Host-authoritative mana duel, pure: the host alone applies intents and broadcasts
 // numbered snapshots; guests send intents and keep the newest snapshot.
-// Picks live in HostState.picks, never in the broadcast Duel, until a round resolves;
-// the spells each player chose live in HostState.loadouts until the game is won.
+// Picks live in HostState.picks, never in the broadcast Duel, until a round resolves.
 
 import type { Action, Chaos, ChaosEvent, Duel, Element, Player } from '../types'
 
 export const ELEMENTS: Element[] = ['fire', 'water', 'nature']
-const EMPOWERED = ELEMENTS.map(e => `${e}+` as const)
-export const ACTIONS: Action[] = ['pass', 'charge', 'supercharge', 'shield', 'drain', 'heal', ...ELEMENTS, ...EMPOWERED, 'avatar']
-/** Every player has these, every game. */
-export const BASICS: Action[] = ['pass', 'charge', 'shield', 'heal']
-/** The nine to choose from, in the order of the choosing grid. */
-export const OPTIONAL: Action[] = [...ELEMENTS, ...EMPOWERED, 'supercharge', 'drain', 'avatar']
-export const LOADOUT_SIZE = 3
+export const ACTIONS: Action[] = ['pass', 'charge', 'shield', 'drain', 'heal', ...ELEMENTS, 'avatar']
 export const START_LIFE = 3
 export const START_MANA = 1
 export const MAX_MANA = 3
 export const SHIELD_COOLDOWN = 2
 export const DRAIN_COOLDOWN = 2
-export const SUPER_COOLDOWN = 5
 export const HEAL_COOLDOWN = 1
 export const HEAL_AMOUNT = 2
-export const AVATAR_DMG = 2
+/** The Avatar State: entered at full mana, for its cost; holds this many rounds, then cools down as long. */
+export const AVATAR_NEEDS = 3
+export const AVATAR_ROUNDS = 3
+export const AVATAR_COOLDOWN = 3
 /** An action picked more often than this, in a game, wants rebalancing. */
 export const OVERUSED = 0.4
 
@@ -30,34 +25,13 @@ const BEATS: Record<Element, Element> = { water: 'fire', fire: 'nature', nature:
 export const COST: Record<Action, number> = {
   pass: 0,
   charge: 0,
-  supercharge: 0,
   shield: 0,
   drain: 1,
   heal: 1,
   fire: 1,
   water: 1,
   nature: 1,
-  'fire+': 2,
-  'water+': 2,
-  'nature+': 2,
-  avatar: 3,
-}
-
-/** What each action does, short enough for the choosing grid. */
-export const DESCRIPTION: Record<Action, string> = {
-  pass: 'does nothing, takes any hit',
-  charge: '+1 mana',
-  supercharge: '+2 mana, then 5 rounds out',
-  shield: 'blocks all damage and theft',
-  drain: '1 dmg + steals 1 mana; loses to elements',
-  heal: '+2 life unless hit',
-  fire: '1 dmg, beats nature',
-  water: '1 dmg, beats fire',
-  nature: '1 dmg, beats water',
-  'fire+': '2 dmg, beats nature and fire',
-  'water+': '2 dmg, beats water and fire',
-  'nature+': '2 dmg, beats water and nature',
-  avatar: 'once: 2 dmg, beats all, pierces shields; drain stops it',
+  avatar: 2,
 }
 
 // ─── chaos ───────────────────────────────────────────────────────────────────
@@ -81,12 +55,12 @@ export const CHAOS_INFO: Record<ChaosEvent, { name: string; effect: string; roun
 
 export const INITIAL_DUEL: Duel = { seq: 0, round: 1, players: {} }
 
-export type HostState = { duel: Duel; picks: Record<string, Action>; loadouts: Record<string, Action[]> }
+export type HostState = { duel: Duel; picks: Record<string, Action> }
 
-export type Intent = { kind: 'act'; action: Action } | { kind: 'rematch' } | { kind: 'loadout'; spells: Action[] }
+export type Intent = { kind: 'act'; action: Action } | { kind: 'rematch' }
 
-/** What a rule may depend on besides the player: the duel (chaos), and the spells they chose. */
-export type Ctx = { duel?: Duel; loadout?: readonly Action[] | null }
+/** What a rule may depend on besides the player: the duel (chaos). */
+export type Ctx = { duel?: Duel }
 
 /** Whether `a` beats `b`; under an eclipse, the other way round. */
 export function beats(a: Element, b: Element, reversed = false) {
@@ -105,26 +79,6 @@ export function isChaosEvent(raw: unknown): raw is ChaosEvent {
   return typeof raw === 'string' && (CHAOS_EVENTS as string[]).includes(raw)
 }
 
-/** Three different optional spells. */
-export function isLoadout(raw: unknown): raw is Action[] {
-  return (
-    Array.isArray(raw) &&
-    raw.length === LOADOUT_SIZE &&
-    new Set(raw).size === LOADOUT_SIZE &&
-    raw.every(a => (OPTIONAL as unknown[]).includes(a))
-  )
-}
-
-/** The element of a basic or empowered spell; undefined for anything else. */
-export function elementOf(a: Action): Element | undefined {
-  const el = a.replace(/\+$/, '')
-  return isElement(el) ? el : undefined
-}
-
-export function isEmpowered(a: Action) {
-  return a.endsWith('+')
-}
-
 /** Whether chaos `event` holds in the duel's current round. */
 export function holds(duel: Pick<Duel, 'chaos' | 'round'>, event: ChaosEvent) {
   const c = duel.chaos
@@ -136,19 +90,23 @@ export function costOf(a: Action, duel?: Duel) {
   return duel && isElement(a) && holds(duel, 'volcano') ? 0 : COST[a]
 }
 
+/** Mana `p` must have to pick `a`: its cost, or for the Avatar State, full mana. */
+export function needOf(a: Action, duel?: Duel) {
+  return a === 'avatar' ? AVATAR_NEEDS : costOf(a, duel)
+}
+
 /** Why `p` may not pick `a` this round; null when they may. */
-export function whyNot(p: Player, a: Action, { duel, loadout }: Ctx = {}): string | null {
-  if (loadout && !BASICS.includes(a) && !loadout.includes(a)) return 'not in your spells'
-  const cost = costOf(a, duel)
-  if (p.mana < cost) return `needs ${cost} mana`
-  if ((a === 'charge' || a === 'supercharge') && p.mana >= MAX_MANA) return 'mana full'
-  if (a === 'supercharge' && p.superCooldown > 0) return `super in ${p.superCooldown}`
+export function whyNot(p: Player, a: Action, { duel }: Ctx = {}): string | null {
+  const need = needOf(a, duel)
+  if (p.mana < need) return `needs ${need} mana`
+  if (a === 'charge' && p.mana >= MAX_MANA) return 'mana full'
   if (a === 'shield' && p.shieldCooldown > 0) return `shield in ${p.shieldCooldown}`
   if (a === 'shield' && duel && holds(duel, 'quake')) return 'earthquake'
   if (a === 'drain' && p.drainCooldown > 0) return `drain in ${p.drainCooldown}`
   if (a === 'heal' && p.life >= START_LIFE) return 'life full'
   if (a === 'heal' && p.healCooldown > 0) return `heal in ${p.healCooldown}`
-  if (a === 'avatar' && p.avatarUsed) return 'used'
+  if (a === 'avatar' && p.avatarRounds > 0) return 'avatar active'
+  if (a === 'avatar' && p.avatarCooldown > 0) return `avatar in ${p.avatarCooldown}`
   return null
 }
 
@@ -181,10 +139,9 @@ export function isDuel(raw: unknown): raw is Duel {
         typeof p.picked === 'boolean' &&
         typeof p.shieldCooldown === 'number' &&
         typeof p.drainCooldown === 'number' &&
-        typeof p.superCooldown === 'number' &&
         typeof p.healCooldown === 'number' &&
-        typeof p.avatarUsed === 'boolean' &&
-        typeof p.ready === 'boolean',
+        typeof p.avatarRounds === 'number' &&
+        typeof p.avatarCooldown === 'number',
     )
   )
 }
@@ -197,10 +154,9 @@ function fresh(name: string): Player {
     picked: false,
     shieldCooldown: 0,
     drainCooldown: 0,
-    superCooldown: 0,
     healCooldown: 0,
-    avatarUsed: false,
-    ready: false,
+    avatarRounds: 0,
+    avatarCooldown: 0,
   }
 }
 
@@ -214,29 +170,20 @@ export function seat(duel: Duel, id: string, name: string): Duel | null {
 export function applyIntent(state: HostState, player: string, intent: unknown, rand: () => number = Math.random): HostState | null {
   if (!intent || typeof intent !== 'object') return null
   const { duel } = state
-  const i = intent as { kind?: unknown; action?: unknown; spells?: unknown }
+  const i = intent as { kind?: unknown; action?: unknown }
 
   if (i.kind === 'rematch') {
     if (duel.winner === undefined) return null
     const players = Object.fromEntries(Object.entries(duel.players).map(([id, p]) => [id, fresh(p.name)]))
-    return { duel: { seq: duel.seq + 1, round: 1, players }, picks: {}, loadouts: {} }
+    return { duel: { seq: duel.seq + 1, round: 1, players }, picks: {} }
   }
 
   const me = duel.players[player]
-  if (i.kind === 'loadout') {
-    if (!me || me.ready || duel.winner !== undefined || !isLoadout(i.spells)) return null
-    return {
-      duel: { ...duel, seq: duel.seq + 1, players: { ...duel.players, [player]: { ...me, ready: true } } },
-      picks: state.picks,
-      loadouts: { ...state.loadouts, [player]: [...i.spells] },
-    }
-  }
-
   if (i.kind !== 'act' || !isAction(i.action)) return null
   const ids = Object.keys(duel.players)
-  // The duel starts once both have chosen their spells.
-  if (!me || duel.winner !== undefined || ids.length < 2 || !ids.every(id => duel.players[id]!.ready)) return null
-  if (!legal(me, i.action, { duel, loadout: state.loadouts[player] ?? null })) return null
+  // The duel starts once both are seated.
+  if (!me || duel.winner !== undefined || ids.length < 2) return null
+  if (!legal(me, i.action, { duel })) return null
   // A recast changes the hidden pick (the other has not picked, or the round
   // would have resolved); the same pick again, a resent intent, changes nothing.
   if (me.picked && state.picks[player] === i.action) return null
@@ -246,46 +193,41 @@ export function applyIntent(state: HostState, player: string, intent: unknown, r
     return {
       duel: { ...duel, seq: duel.seq + 1, players: { ...duel.players, [player]: { ...me, picked: true } } },
       picks,
-      loadouts: state.loadouts,
     }
   }
-  return { duel: resolve(duel, picks, state.loadouts, rand), picks: {}, loadouts: state.loadouts }
+  return { duel: resolve(duel, picks, rand), picks: {} }
 }
 
-/** Damage `target` takes from `attacker` this round. */
-function damage(target: Action, attacker: Action, reversed: boolean) {
-  // The Avatar State beats everything but a drain, which stops it, and pierces a shield.
-  if (attacker === 'avatar') return target === 'avatar' || target === 'drain' ? 0 : target === 'shield' ? 1 : AVATAR_DMG
-  if (target === 'avatar') return attacker === 'drain' ? 1 : 0
-  const atk = elementOf(attacker)
+/** Damage `target` takes from `attacker` this round; an element of an avatar's hits for 1 more. */
+function damage(target: Action, attacker: Action, reversed: boolean, buffed: boolean) {
+  const atk = isElement(attacker) ? attacker : undefined
   if (!atk && attacker !== 'drain') return 0
   if (target === 'shield') return 0
-  const power = isEmpowered(attacker) ? 2 : 1
-  const def = elementOf(target)
-  if (!def) {
-    // Charge, heal, or a drain: an element beats a drain, two drains tie.
+  const power = atk && buffed ? 2 : 1
+  if (!isElement(target)) {
+    // Pass, charge, heal, the Avatar State entered, or a drain: an element beats a drain, two drains tie.
     return target === 'drain' && !atk ? 0 : power
   }
-  if (!atk) return 0
-  if (beats(atk, def, reversed)) return power
-  if (atk === def && isEmpowered(attacker) && !isEmpowered(target)) return 1
-  return 0
+  return atk && beats(atk, target, reversed) ? power : 0
 }
 
-function resolve(duel: Duel, picks: Record<string, Action>, loadouts: Record<string, Action[]>, rand: () => number): Duel {
+function resolve(duel: Duel, picks: Record<string, Action>, rand: () => number): Duel {
   const [a, b] = Object.keys(duel.players) as [string, string]
   const other = (id: string) => (id === a ? b : a)
   const ps: Record<string, Player> = {}
+  // Whoever entered the Avatar State before this round is in it now.
+  const buffed = [a, b].filter(id => duel.players[id]!.avatarRounds > 0)
+  const isBuffed = (id: string) => buffed.includes(id)
   // 1. costs, 2. charges.
   for (const id of [a, b]) {
     const p = duel.players[id]!
     const pick = picks[id]!
-    const gain = pick === 'charge' ? 1 : pick === 'supercharge' ? 2 : 0
+    const gain = pick === 'charge' ? (isBuffed(id) ? 2 : 1) : 0
     ps[id] = { ...p, picked: false, mana: Math.min(MAX_MANA, p.mana - costOf(pick, duel) + gain) }
   }
   // 3. damage (at most one side), then heals that were not hit.
   const reversed = holds(duel, 'eclipse')
-  const dmg = { [a]: damage(picks[a]!, picks[b]!, reversed), [b]: damage(picks[b]!, picks[a]!, reversed) }
+  const dmg = { [a]: damage(picks[a]!, picks[b]!, reversed, isBuffed(b)), [b]: damage(picks[b]!, picks[a]!, reversed, isBuffed(a)) }
   const loser = dmg[a]! > 0 ? a : dmg[b]! > 0 ? b : null
   const healed: Record<string, number> = {}
   for (const id of [a, b]) {
@@ -296,13 +238,12 @@ function resolve(duel: Duel, picks: Record<string, Action>, loadouts: Record<str
       p.life += healed[id]
     }
   }
-  // 4. theft: a landed drain takes a mana (two from a super charger), if there is any.
+  // 4. theft: a landed drain takes a mana, if there is any.
   let stole = false
   if (loser && picks[other(loser)] === 'drain' && ps[loser]!.mana > 0) {
-    const taken = Math.min(ps[loser]!.mana, picks[loser] === 'supercharge' ? 2 : 1)
     const thief = ps[other(loser)]!
-    ps[loser]!.mana -= taken
-    thief.mana = Math.min(MAX_MANA, thief.mana + taken)
+    ps[loser]!.mana -= 1
+    thief.mana = Math.min(MAX_MANA, thief.mana + 1)
     stole = true
   }
   // 5. timers.
@@ -310,9 +251,13 @@ function resolve(duel: Duel, picks: Record<string, Action>, loadouts: Record<str
     const p = ps[id]!
     p.shieldCooldown = picks[id] === 'shield' ? SHIELD_COOLDOWN : Math.max(0, p.shieldCooldown - 1)
     p.drainCooldown = picks[id] === 'drain' ? DRAIN_COOLDOWN : Math.max(0, p.drainCooldown - 1)
-    p.superCooldown = picks[id] === 'supercharge' ? SUPER_COOLDOWN : Math.max(0, p.superCooldown - 1)
     p.healCooldown = picks[id] === 'heal' ? HEAL_COOLDOWN : Math.max(0, p.healCooldown - 1)
-    p.avatarUsed = p.avatarUsed || picks[id] === 'avatar'
+    // The Avatar State holds its rounds, then cools down.
+    if (picks[id] === 'avatar') p.avatarRounds = AVATAR_ROUNDS
+    else if (p.avatarRounds > 0) {
+      p.avatarRounds--
+      if (p.avatarRounds === 0) p.avatarCooldown = AVATAR_COOLDOWN
+    } else p.avatarCooldown = Math.max(0, p.avatarCooldown - 1)
   }
   // 6. death.
   const dead = loser !== null && ps[loser]!.life <= 0
@@ -323,10 +268,10 @@ function resolve(duel: Duel, picks: Record<string, Action>, loadouts: Record<str
     round: duel.round + 1,
     players: ps,
     tally,
-    last: { round: duel.round, picks: { [a]: picks[a]!, [b]: picks[b]! }, loser, dmg: loser ? dmg[loser]! : 0, stole, healed },
+    last: { round: duel.round, picks: { [a]: picks[a]!, [b]: picks[b]! }, loser, dmg: loser ? dmg[loser]! : 0, stole, healed, buffed },
     ...(duel.chaos ? { chaos: duel.chaos } : {}),
     ...(duel.chaosCount ? { chaosCount: duel.chaosCount } : {}),
-    ...(dead ? { winner: other(loser), loadouts } : {}),
+    ...(dead ? { winner: other(loser) } : {}),
   }
   // 7. at the start of the next round, the world may strike.
   return dead ? next : maybeChaos(next, rand)
@@ -359,7 +304,7 @@ export function strike(duel: Duel, event: ChaosEvent): Duel {
       case 'rain':
         return { ...p, life: Math.min(START_LIFE, p.life + 1) }
       case 'rift':
-        return { ...p, shieldCooldown: 0, drainCooldown: 0, superCooldown: 0, healCooldown: 0 }
+        return { ...p, shieldCooldown: 0, drainCooldown: 0, healCooldown: 0, avatarCooldown: 0 }
       case 'tornado':
         return { ...p, mana: average }
       default:
@@ -374,7 +319,7 @@ export function strike(duel: Duel, event: ChaosEvent): Duel {
   }
 }
 
-/** One line for a finished game: who won, how long it took, what was picked how often, who chose what. */
+/** One line for a finished game: who won, how long it took, what was picked how often. */
 export function summary(duel: Duel) {
   const tally = Object.entries(duel.tally ?? {}).sort(([, x], [, y]) => y - x)
   const total = tally.reduce((n, [, k]) => n + k, 0)
@@ -384,13 +329,11 @@ export function summary(duel: Duel) {
   })
   const never = ACTIONS.filter(a => a !== 'pass' && !duel.tally?.[a])
   const winner = duel.winner ? duel.players[duel.winner]?.name : undefined
-  const chosen = Object.entries(duel.loadouts ?? {}).map(([id, spells]) => `${duel.players[id]?.name ?? '?'}: ${spells.join(', ')}`)
   const chaos = duel.chaosCount ? [`${duel.chaosCount} chaos event${duel.chaosCount === 1 ? '' : 's'}`] : []
   return [
     `${winner ?? 'nobody'} won in ${duel.last?.round ?? 0} rounds`,
     ...(picks.length ? [picks.join(', ')] : []),
     ...(never.length ? [`never: ${never.join(', ')}`] : []),
-    ...chosen,
     ...chaos,
   ].join(' · ')
 }

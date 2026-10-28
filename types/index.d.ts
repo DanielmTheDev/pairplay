@@ -2,11 +2,8 @@ export type Room = { code: string; lastId?: string; role?: 'host' | 'guest' }
 
 export type Element = 'fire' | 'water' | 'nature'
 
-/** A basic spell, or `fire+` and the like: empowered. */
-export type Spell = Element | `${Element}+`
-
 /** `pass`: does nothing, always allowed, so nobody is ever stuck. */
-export type Action = 'pass' | 'charge' | 'supercharge' | 'shield' | 'drain' | 'heal' | 'avatar' | Spell
+export type Action = 'pass' | 'charge' | 'shield' | 'drain' | 'heal' | 'avatar' | Element
 
 /** What the world throws at both players, now and then. */
 export type ChaosEvent = 'blizzard' | 'lightning' | 'volcano' | 'eclipse' | 'rain' | 'quake' | 'rift' | 'tornado'
@@ -19,12 +16,10 @@ export type Player = {
   picked: boolean
   shieldCooldown: number
   drainCooldown: number
-  superCooldown: number
   healCooldown: number
-  /** The Avatar State, once a game. */
-  avatarUsed: boolean
-  /** Has chosen this game's spells. */
-  ready: boolean
+  /** Rounds of the Avatar State left: its elements hit and its charges gain 1 more. */
+  avatarRounds: number
+  avatarCooldown: number
 }
 
 /** A chaos event: struck at the start of `round`, holds through `until`. */
@@ -46,6 +41,8 @@ export type RoundResult = {
   stole: boolean
   /** Who healed, by how much (not hit while healing). */
   healed: Record<string, number>
+  /** Who was in the Avatar State this round. */
+  buffed: string[]
 }
 
 /** Public duel state: what the host broadcasts. Picks stay on the host until a round resolves. */
@@ -60,8 +57,6 @@ export type Duel = {
   /** The latest chaos event, and how many struck this game. */
   chaos?: Chaos
   chaosCount?: number
-  /** Each player's chosen spells, revealed once the game is won. */
-  loadouts?: Record<string, Action[]>
 }
 
 export type Peer = { name: string; lastSeen: number }
@@ -81,9 +76,6 @@ declare module 'claude-code' {
       game: Shaped<Duel>
       picks: Record<string, Action>
       mine: { round: number; action: Action } | null
-      loadouts: Record<string, Action[]>
-      myLoadout: Action[] | null
-      draft: Action[]
     }
   }
 }

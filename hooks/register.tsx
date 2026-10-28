@@ -4,19 +4,13 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Action, ChaosEvent, Conn, Duel, LogLine, Peer, Player } from '../types'
 import {
   ACTIONS,
-  BASICS,
   CHAOS_INFO,
-  COST,
-  DESCRIPTION,
   INITIAL_DUEL,
-  LOADOUT_SIZE,
   MAX_MANA,
-  OPTIONAL,
   acceptSnapshot,
   applyIntent,
   holds,
   isAction,
-  isLoadout,
   legal,
   seat,
   summary,
@@ -28,6 +22,7 @@ import {
   CARD_ROWS,
   CHAOS_MS,
   FRAME_MS,
+  REMATCH_COLS,
   STAGE_PX_H,
   STAGE_ROWS,
   drawStage,
@@ -52,45 +47,35 @@ import {
   type Envelope,
 } from './protocol'
 import type { CardsProps } from './cards'
+import { notifiers } from './notify'
 
 const PANE = 'pairplay'
 type Card = { action: Action; label: string; hotkey: string }
-// The pane's buttons, under their cards, each with its hotkey: moves, then spells.
+// The pane's buttons, under their cards, each with its hotkey: the attacks, then the rest.
 // Pass has no card: a plain button under them, for when nothing else is left.
 const BUTTONS: Card[] = [
-  { action: 'charge', label: 'charge', hotkey: 'c' },
-  { action: 'supercharge', label: 'super', hotkey: 'u' },
-  { action: 'shield', label: 'shield', hotkey: 's' },
-  { action: 'drain', label: 'drain', hotkey: 'd' },
-  { action: 'heal', label: 'heal', hotkey: 'h' },
-  { action: 'avatar', label: 'avatar', hotkey: 'a' },
   { action: 'fire', label: 'fire', hotkey: '1' },
   { action: 'water', label: 'water', hotkey: '2' },
   { action: 'nature', label: 'nature', hotkey: '3' },
-  { action: 'fire+', label: 'fire+', hotkey: '4' },
-  { action: 'water+', label: 'water+', hotkey: '5' },
-  { action: 'nature+', label: 'nature+', hotkey: '6' },
+  { action: 'drain', label: 'drain', hotkey: 'd' },
+  { action: 'charge', label: 'charge', hotkey: 'c' },
+  { action: 'shield', label: 'shield', hotkey: 's' },
+  { action: 'heal', label: 'heal', hotkey: 'h' },
+  { action: 'avatar', label: 'avatar', hotkey: 'a' },
 ]
-const CARDS_PER_ROW = 6
+const CARDS_PER_ROW = 4
 
-/** The button rows for a pane `columns` wide: the basics and the chosen spells (all, when not known), wrapped to fit. */
-function cardRows(columns: number, loadout: readonly Action[] | null) {
-  const shown = BUTTONS.filter(b => !loadout || BASICS.includes(b.action) || loadout.includes(b.action))
+/** The button rows for a pane `columns` wide, wrapped to fit. */
+function cardRows(columns: number) {
   const per = Math.max(1, Math.min(CARDS_PER_ROW, Math.floor(columns / CARD_COLS)))
-  return Array.from({ length: Math.ceil(shown.length / per) }, (_, i) => shown.slice(i * per, (i + 1) * per))
+  return Array.from({ length: Math.ceil(BUTTONS.length / per) }, (_, i) => BUTTONS.slice(i * per, (i + 1) * per))
 }
 
-/** Pane rows the duel needs besides the cards: header, round, stage, players, result, pass, input, a little log. */
-const DUEL_ROWS = 2 + 1 + 1 + STAGE_ROWS + 2 + 1 + 1 + 1 + 3
+/** Lines of the log the pane shows, right under the cards. */
+const LOG_LINES = 2
 
-/** The choosing grid: the nine optional spells, three by three. */
-const DRAFT_ROWS = [OPTIONAL.slice(0, 3), OPTIONAL.slice(3, 6), OPTIONAL.slice(6, 9)]
-/** Pane rows the choosing grid needs: a title, then per row its cards, button and description. */
-const DRAFT_PANE_ROWS = 2 + 1 + DRAFT_ROWS.length * (CARD_ROWS + 3) + 2
-
-function draftCell(columns: number) {
-  return Math.max(CARD_COLS, Math.min(24, Math.floor(columns / 3)))
-}
+/** Pane rows the duel needs besides the cards: header, round, stage, players, pass, the log, input. */
+const DUEL_ROWS = 2 + 1 + 1 + STAGE_ROWS + 2 + 1 + 1 + LOG_LINES + 1
 
 const CHAOS_ICON: Record<ChaosEvent, string> = {
   blizzard: '❄',
@@ -119,27 +104,19 @@ const log = atom({ plugin: 'pairplay', key: 'log' } as const, [], { shape: 'log-
 const conn = atom({ plugin: 'pairplay', key: 'conn' } as const, 'off' as Conn)
 // The relay chosen with `/coop relay` or a join link; null: the configured one.
 const relayChoice = atom({ plugin: 'pairplay', key: 'relay' } as const, null, { shape: 'relay-1' })
-const game = atom({ plugin: 'pairplay', key: 'game' } as const, INITIAL_DUEL, { shape: 'duel-3' })
+const game = atom({ plugin: 'pairplay', key: 'game' } as const, INITIAL_DUEL, { shape: 'duel-4' })
 // Host only: the round's hidden picks, never broadcast.
 const picks = atom({ plugin: 'pairplay', key: 'picks' } as const, {})
 // Guest only: what this player cast this round, for the icon over their head.
 const mine = atom({ plugin: 'pairplay', key: 'mine' } as const, null)
-// Host only: the spells each player chose this game, never broadcast until it is won.
-const loadouts = atom({ plugin: 'pairplay', key: 'loadouts' } as const, {})
-// Guest only: the spells this player chose, for the buttons.
-const myLoadout = atom({ plugin: 'pairplay', key: 'myLoadout' } as const, null)
-// The spells ticked on the choosing grid, not sent yet.
-const draft = atom({ plugin: 'pairplay', key: 'draft' } as const, [])
 
 const HELP = [
   '/coop host          create a room, share the code',
   '/coop join <code> [relay]  join the other player',
   '/coop relay [url]   show or switch the relay (both players)',
   '/coop say <text>    chat (or type in the pane)',
-  '/coop pick a b c    choose this game\'s 3 spells (or tick them in the pane):',
-  `                    ${OPTIONAL.join(' ')}`,
-  '/coop <action>      pass | charge | shield | heal, and your 3: supercharge | drain (1 mana)',
-  '                    fire | water | nature (1), fire+ ... (2), avatar (3, once)',
+  '/coop <action>      pass | charge | shield | heal | drain (1 mana) | fire | water | nature (1)',
+  '                    avatar (at 3 mana, costs 2): elements +1 dmg, charge +1, for 3 rounds',
   '/coop rematch       new duel after one is won',
   '/coop leave         leave the room',
   '/coop               open the pane',
@@ -171,8 +148,6 @@ let loop: { cancel(): void } | undefined
 let stageCols = 0
 // The card rows the pane drew, for the loop to repaint; empty when it drew none.
 let shownCards: Card[][] = []
-// The choosing grid the pane drew, for the loop to repaint; undefined when it drew none.
-let shownDraft: { cell: number } | undefined
 
 async function addLog($: $, who: string, text: string, kind: LogLine['kind'] = 'info') {
   await update($, log, list => [...list, { t: Date.now(), who, text, kind }].slice(-200))
@@ -327,10 +302,9 @@ async function hostApplyNow($: $, id: string, name: string, intent: unknown) {
   await update($, game, d => seat(d, me, myName) ?? d)
   await update($, game, d => seat(d, id, name) ?? d)
   const before = await read($, game)
-  const next = applyIntent({ duel: before, picks: await read($, picks), loadouts: await read($, loadouts) }, id, intent)
+  const next = applyIntent({ duel: before, picks: await read($, picks) }, id, intent)
   if (!next) return null
   await update($, picks, () => next.picks)
-  await update($, loadouts, () => next.loadouts)
   await update($, game, () => next.duel)
   // Not awaited: retries must not hold up the next change; seq orders them.
   void send($, 'state', next.duel)
@@ -368,7 +342,17 @@ async function onDuelChange($: $, before: Duel, after: Duel) {
 async function announce($: $, d: Duel) {
   const text = roundText(d) + (d.winner !== undefined ? ` · ${nameOf(d, d.winner)} wins!` : '')
   await addLog($, '⚔', text)
-  // No notification channel: a toast at least.
+  await notify($, text)
+}
+
+/** A notification by the system's own notifier, else the terminal's, else a toast at least. */
+async function notify($: $, text: string) {
+  const windows = (await $.env.get('OS')) === 'Windows_NT'
+  for (const n of notifiers('pairplay', text, windows)) {
+    try {
+      if ((await $.process.run(n.argv, n.env ? { env: n.env } : {})).exitCode === 0) return
+    } catch {}
+  }
   const sent = await $.ui.notify(text, { title: 'pairplay' }).catch(() => ({ isSent: false }))
   if (!sent.isSent) $.ui.toast(text)
 }
@@ -400,18 +384,6 @@ async function stageView($: $, d: Duel): Promise<StageView> {
   return { me, now, ...(t !== undefined ? { t } : {}), ...(myPick ? { myPick } : {}), ...(chaosT !== undefined ? { chaosT } : {}) }
 }
 
-/** The spells this player chose this game; null when not known (joined late, reloaded). */
-async function myLoadoutOf($: $) {
-  if (await isHost($)) return (await read($, loadouts))[me] ?? null
-  return read($, myLoadout)
-}
-
-/** Ticks or unticks a spell on the choosing grid; a full hand takes no more. */
-async function toggle($: $, a: Action) {
-  await update($, draft, list => (list.includes(a) ? list.filter(x => x !== a) : list.length < LOADOUT_SIZE ? [...list, a] : list))
-  $.ui.invalidate('ui.render')
-}
-
 async function tick($: $) {
   if (!stageCols) return
   const d = await read($, game)
@@ -427,8 +399,6 @@ async function tick($: $) {
     $.ui.invalidate('ui.render')
     return
   }
-  // The choosing grid has no stage; its cards, like the action cards, animate themselves.
-  if (shownDraft) return
   // Denied while the pane is closed: nothing to paint, the loop just idles.
   await $.ui.blit({ requestId: PANE, key: 'stage', cells: encodeCells(drawStage(d, stageCols, view), stageCols, STAGE_PX_H) })
 }
@@ -438,27 +408,14 @@ async function act($: $, intent: Intent) {
   const duel = await read($, game)
   const p = duel.players[me]
   if (intent.kind === 'act') {
-    const why = p ? whyNot(p, intent.action, { duel, loadout: await myLoadoutOf($) }) : 'not seated'
+    const why = p ? whyNot(p, intent.action, { duel }) : 'not seated'
     if (why) return `${describe(intent)}: ${why}`
-    if (!p!.ready) return `${describe(intent)}: choose your spells first (the grid in the pane, or /coop pick a b c)`
-    const waiting = Object.entries(duel.players).find(([id, q]) => id !== me && !q.ready)
-    if (waiting) return `${describe(intent)}: ${waiting[1].name} is still choosing spells`
-  }
-  if (intent.kind === 'loadout') {
-    if (!p) return 'not seated'
-    if (p.ready) return 'Spells already chosen for this game.'
-    if (!isLoadout(intent.spells)) return `Pick ${LOADOUT_SIZE} different spells.`
   }
   if (!(await isHost($))) {
     if (intent.kind === 'act') {
       const action = intent.action
       const round = duel.round
       await update($, mine, () => ({ round, action }))
-    }
-    if (intent.kind === 'loadout') {
-      const spells = intent.spells
-      await update($, myLoadout, () => spells)
-      await update($, draft, () => [])
     }
     pending = { intent, states: statesSeen, tries: 0 }
     $.clock.after(RESEND_MS, () => void quietly(() => resend($)))
@@ -467,7 +424,6 @@ async function act($: $, intent: Intent) {
   }
   const d = await hostApply($, me, myName, intent)
   if (!d) return `${describe(intent)}: not allowed now`
-  if (intent.kind === 'loadout') await update($, draft, () => [])
   return d.last && d.last.round === d.round - 1 && intent.kind === 'act' ? `${describe(intent)}, round resolves…` : describe(intent)
 }
 
@@ -498,7 +454,7 @@ async function resend($: $) {
 }
 
 function describe(intent: Intent) {
-  return intent.kind === 'act' ? intent.action : intent.kind === 'loadout' ? `spells: ${intent.spells.join(', ')}` : 'rematch'
+  return intent.kind === 'act' ? intent.action : 'rematch'
 }
 
 function nameOf(d: Duel, id: string) {
@@ -521,9 +477,9 @@ function timers(p: Player) {
   const timers = [
     ...(p.shieldCooldown > 0 ? [`shield in ${p.shieldCooldown}`] : []),
     ...(p.drainCooldown > 0 ? [`drain in ${p.drainCooldown}`] : []),
-    ...(p.superCooldown > 0 ? [`super in ${p.superCooldown}`] : []),
     ...(p.healCooldown > 0 ? [`heal in ${p.healCooldown}`] : []),
-    ...(p.avatarUsed ? ['avatar used'] : []),
+    ...(p.avatarRounds > 0 ? [`avatar ${p.avatarRounds} round${p.avatarRounds === 1 ? '' : 's'}`] : []),
+    ...(p.avatarCooldown > 0 ? [`avatar in ${p.avatarCooldown}`] : []),
   ]
   return timers.map(x => ` · ${x}`).join('')
 }
@@ -618,9 +574,6 @@ async function enter($: $, code: string, role: 'host' | 'guest') {
   await update($, room, () => ({ code, role }))
   await update($, game, () => (role === 'host' ? (seat(INITIAL_DUEL, me, myName) ?? INITIAL_DUEL) : INITIAL_DUEL))
   await update($, picks, () => ({}))
-  await update($, loadouts, () => ({}))
-  await update($, myLoadout, () => null)
-  await update($, draft, () => [])
   await update($, peers, () => ({}))
   await addLog($, 'you', `${verb} room ${code}`)
   await start($)
@@ -721,12 +674,6 @@ export const register: Register = (on, options) => {
       }
       case 'rematch':
         return { text: await act($, { kind: 'rematch' }) }
-      case 'pick': {
-        if (!arg) return { text: `Choose 3 spells for this game: ${OPTIONAL.join(', ')} (e.g. /coop pick fire drain avatar).` }
-        const spells = rest.map(x => x.toLowerCase())
-        if (!isLoadout(spells)) return { text: `Pick 3 different spells of: ${OPTIONAL.join(', ')}.` }
-        return { text: await act($, { kind: 'loadout', spells }) }
-      }
       default: {
         const action = verb.toLowerCase()
         if (isAction(action)) return { text: await act($, { kind: 'act', action }) }
@@ -735,13 +682,12 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // A click on a card (./cards.tsx): cast it, or on the choosing grid, tick it.
+  // A click on a card (./cards.tsx): cast it, or ask for the rematch.
   on('ui.message', async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const a = (e.data as { action?: unknown } | null)?.action
-    if (!isAction(a)) return {}
-    if (e.element.startsWith('draft-')) await toggle($, a)
-    else if (e.element.startsWith('cards-')) await act($, { kind: 'act', action: a })
+    const data = e.data as { action?: unknown; rematch?: unknown } | null
+    if (e.element === 'rematch' && data?.rematch === true) await act($, { kind: 'rematch' })
+    else if (e.element.startsWith('cards-') && isAction(data?.action)) await act($, { kind: 'act', action: data.action })
     return {}
   })
 
@@ -763,26 +709,14 @@ export const register: Register = (on, options) => {
     stageCols = Raster ? stageColumns(e.props.bodyColumns) : 0
     const color = (id: string) => (id === Object.keys(g.players)[0] ? '#7f9cff' : '#ff6f86')
     const you = g.players[me]
-    const loadout = await myLoadoutOf($)
-    const ctx = { duel: g, loadout }
-    // Before the duel: the choosing grid, until this player has chosen; then a wait for the other.
-    const choosing = !!r && !!you && !you.ready && g.winner === undefined
-    const waitingFor = choosing || g.winner !== undefined ? undefined : Object.entries(g.players).find(([id, q]) => id !== me && !q.ready)?.[1]
-    const chosen = await read($, draft)
-    const cell = draftCell(e.props.bodyColumns)
-    shownDraft = choosing && Client && (!e.viewport || e.viewport.rows >= DRAFT_PANE_ROWS) ? { cell } : undefined
-    const buttons = choosing || waitingFor ? [] : cardRows(e.props.bodyColumns, loadout)
+    const ctx = { duel: g }
+    const buttons = r && g.winner === undefined ? cardRows(e.props.bodyColumns) : []
     // Cards only where they fit: on a short pane the buttons alone, under the stage.
     const cardsFit = !e.viewport || e.viewport.rows >= DUEL_ROWS + buttons.length * (CARD_ROWS + 1)
     shownCards = Client && cardsFit ? buttons : []
-    const used = choosing
-      ? DRAFT_PANE_ROWS + 4
-      : 9 + (Raster ? STAGE_ROWS + 1 : 0) + buttons.length * (shownCards.length ? CARD_ROWS + 1 : 1)
-    const rows = Math.max(3, (e.viewport?.rows ?? 24) - used)
     // Announced once the round that brought it has played.
     const banner = playing ? null : chaosBanner(g)
-    const others = Object.entries(g.players).filter(([id]) => id !== me)
-    const submit = async () => void (await act($, { kind: 'loadout', spells: await read($, draft) }))
+    const logLines = r ? lines.slice(-LOG_LINES) : []
 
     return (
       <Box flexDirection="column">
@@ -792,52 +726,7 @@ export const register: Register = (on, options) => {
         <Text dimColor>
           {live.length === 0 ? 'waiting for the other player…' : `with: ${live.map(([, p]) => p.name).join(', ')}`}
         </Text>
-        {r && choosing && (
-          <Box flexDirection="column" marginTop={1}>
-            <Text bold>
-              Choose {LOADOUT_SIZE} spells{' '}
-              <Text dimColor>
-                · {chosen.length}/{LOADOUT_SIZE} · pass, charge, shield and heal are always yours
-              </Text>
-            </Text>
-            {DRAFT_ROWS.map((row, i) => (
-              <Box flexDirection="column">
-                {Client && shownDraft && (
-                  <Client
-                    key={`draft-${i}`}
-                    module="./cards.tsx"
-                    width={row.length * cell}
-                    height={CARD_ROWS}
-                    props={{ kind: 'draft', actions: row, chosen, cell } satisfies CardsProps}
-                  />
-                )}
-                <Box flexDirection="row">
-                  {row.map((a, j) => (
-                    <Box width={cell} flexShrink={0} flexDirection="column">
-                      <Button
-                        key={`pick-${a}`}
-                        label={`${chosen.includes(a) ? '✓' : '·'} ${a} ${'◆'.repeat(COST[a])}`}
-                        hotkey={String(i * DRAFT_ROWS.length + j + 1)}
-                        plain
-                        onPress={() => void toggle($, a)}
-                      />
-                      <Text dimColor>{DESCRIPTION[a]}</Text>
-                    </Box>
-                  ))}
-                </Box>
-              </Box>
-            ))}
-            {chosen.length === LOADOUT_SIZE ? (
-              <Button key="start" label="▶ start" hotkey="s" onPress={() => void submit()} />
-            ) : (
-              <Text dimColor>start: tick {LOADOUT_SIZE - chosen.length} more</Text>
-            )}
-            {others.map(([, q]) => (
-              <Text dimColor>{q.ready ? `${q.name} is ready` : `${q.name} is choosing…`}</Text>
-            ))}
-          </Box>
-        )}
-        {r && !choosing && (
+        {r && (
           <Box flexDirection="column" marginTop={1}>
             <Text bold>
               {playing ? `round ${g.round - 1}…` : g.winner ? `${nameOf(g, g.winner)} wins!` : `round ${g.round}`}{' '}
@@ -872,15 +761,13 @@ export const register: Register = (on, options) => {
                 </Text>
               ),
             )}
-            {g.last && !playing && <Text dimColor>{roundText(g)}</Text>}
-            {waitingFor && (
-              <Text dimColor>
-                waiting for {waitingFor.name} to choose their spells…
-                {loadout ? ` yours: ${[...BASICS, ...loadout].join(', ')}` : ''}
-              </Text>
-            )}
             {g.winner ? (
-              <Button key="rematch" label="⚔ rematch" hotkey="r" onPress={() => void act($, { kind: 'rematch' })} />
+              <Box flexDirection="column">
+                {Client && cardsFit && (
+                  <Client key="rematch" module="./cards.tsx" width={REMATCH_COLS} height={CARD_ROWS} props={{ kind: 'rematch' } satisfies CardsProps} />
+                )}
+                <Button key="rematch" label="⚔ rematch" hotkey="r" onPress={() => void act($, { kind: 'rematch' })} />
+              </Box>
             ) : (
               buttons.map((row, i) => (
                 <Box flexDirection="column">
@@ -896,7 +783,6 @@ export const register: Register = (on, options) => {
                           actions: row.map(b => b.action),
                           player: you ?? null,
                           duel: g,
-                          loadout,
                           pressable: row.map(b => b.action).filter(a => you && legal(you, a, ctx)),
                         } satisfies CardsProps
                       }
@@ -928,15 +814,16 @@ export const register: Register = (on, options) => {
             )}
           </Box>
         )}
-        <Box flexDirection="column" marginTop={1}>
-          {lines.length === 0 && <Text dimColor>{HELP}</Text>}
-          {lines.slice(-rows).map(l =>
+        {/* The log, right under the cards: the last lines only, bright. */}
+        <Box flexDirection="column" marginTop={r ? 0 : 1}>
+          {!r && <Text dimColor>{HELP}</Text>}
+          {logLines.map(l =>
             l.kind === 'chat' ? (
               <Text>
-                <Text bold>{l.who}</Text>: {l.text}
+                <Text bold color="#7fd8ff">{l.who}</Text>: {l.text}
               </Text>
             ) : (
-              <Text dimColor>
+              <Text color={l.who === '⚔' ? '#ffe14a' : l.who === 'chaos' ? '#ffb347' : undefined} bold={l.who === '⚔'}>
                 {l.who} {l.text}
               </Text>
             ),
