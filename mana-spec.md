@@ -21,9 +21,9 @@ Design goal: **no dominant strategy**. Every action is beaten by some other acti
 | Pass | 0 | Nothing; takes any hit. So nobody is ever stuck with no legal action | — |
 | Charge | 0 | +1 mana | Illegal at 3 mana |
 | Shield | 0 | Blocks all damage and mana theft this round | 2-round cooldown |
-| Fire / Water / Nature | 1 | 1 damage to the opponent if it lands (2 in the Avatar State) | — |
+| Fire / Water / Nature | 0 | 1 damage to the opponent if it lands. In the Avatar State: costs 1, deals 2; at 0 mana cast plain (free, 1) | — |
 | Drain | 1 | No element. If it lands: 1 damage, and 1 mana moves from the opponent to you (the drainer is capped at 3) | 2-round cooldown |
-| Heal | 1 | +2 life (max 3). Fizzles if you are hit this round | Illegal at 3 life. 1-round cooldown |
+| Heal | 1 | +2 life (max 3). Fizzles if you are hit this round | Illegal at 3 life. 7-round cooldown |
 | Avatar State | 2 | No attack: takes any hit that round, like Pass. For the next 3 rounds, every element the avatar casts deals 1 more, and Charge gives +2 (capped at 3) | Needs 3 mana. Not while it holds; then a 3-round cooldown |
 
 Costs are paid when the round resolves, whatever the outcome (blocked, tied or fizzled).
@@ -67,7 +67,7 @@ The mana cap can't be exceeded: charging at 3 is illegal, and a drainer has at m
 
 - **Shield cooldown**: if you shield in round *n*, you can't shield in rounds *n+1* and *n+2*. It's available again in *n+3* (round 1 → round 4).
 - **Drain cooldown**: if you cast Drain in round *n*, you can't cast it in rounds *n+1* and *n+2*. It's available again in *n+3*. The cooldown starts whether the Drain landed, was blocked or tied.
-- **Heal cooldown**: used in round *n* (landed or fizzled), back in *n+2*.
+- **Heal cooldown**: used in round *n* (landed or fizzled), back in *n+8*.
 - **Avatar State**: entered in round *n*, it holds in rounds *n+1* to *n+3*, cools down in *n+4* to *n+6*, and can be entered again in *n+7*. A Time Rift ends the cooldown, never the Avatar State itself.
 
 ## Chaos events
@@ -81,7 +81,7 @@ Fair for both players, never a hit, never deciding a game on their own.
 |---|---|---|
 | Blizzard | Both drop to 0 mana | — |
 | Lightning Storm | Both go to 3 mana | — |
-| Volcano Eruption | Fire, Water and Nature (basic) cost 0 | 2 rounds |
+| Volcano Eruption | Fire, Water and Nature hit for 1 more (stacks with the Avatar State) | 2 rounds |
 | Eclipse | Elements beat each other the other way: fire > water > nature > fire | 2 rounds |
 | Healing Rain | Both +1 life (max 3) | — |
 | Earthquake | No Shield this round | 1 round |

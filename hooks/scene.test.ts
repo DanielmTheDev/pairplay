@@ -353,6 +353,8 @@ test('cards: in the Avatar State, elements and charge glow gold', async () => {
     expect(buffed.includes(COLORS.cardGold)).toBe(true)
   }
   expect(card(drawCards(['shield'], P('dani', { avatarRounds: 2 }), 0), 0, 1).includes(COLORS.cardGold)).toBe(false)
+  // Out of mana, an element is cast plain.
+  expect(card(drawCards(['fire'], P('dani', { mana: 0, avatarRounds: 2 }), 0), 0, 1).includes(COLORS.cardGold)).toBe(false)
 })
 
 test('cards: the one under the pointer lights up', async () => {
@@ -375,31 +377,36 @@ test('cards: what is not allowed is grey; a cooldown shows its rounds left in re
 })
 
 test('cards: cost shown as mana pips, missing ones marked', async () => {
-  const pips = (a: 'charge' | 'fire' | 'avatar', mana: number) => {
-    const c = card(drawCards([a], P('dani', { mana }), 0), 0, 1)
+  const pips = (a: 'charge' | 'fire' | 'avatar', mana: number, avatarRounds = 0) => {
+    const c = card(drawCards([a], P('dani', { mana, avatarRounds }), 0), 0, 1)
     return [c.filter(x => x === COLORS.mana).length, c.filter(x => x === COLORS.manaShort).length]
   }
   expect(pips('charge', 1)).toEqual([0, 0])
-  expect(pips('fire', 1)).toEqual([2, 0])
+  // The elements are free; in the Avatar State they cost 1, unless cast plain.
+  expect(pips('fire', 1)).toEqual([0, 0])
+  expect(pips('fire', 1, 2)).toEqual([2, 0])
+  expect(pips('fire', 0, 2)).toEqual([0, 0])
   // The Avatar State costs 2 but needs a full 3: the third pip only asks for it.
   expect(pips('avatar', 3)).toEqual([4, 0])
   expect(pips('avatar', 2)).toEqual([0, 6])
 })
 
-test('cards: a volcano makes the basic elements free', async () => {
-  const d = duel({ round: 4, chaos: { event: 'volcano', round: 4, until: 5, before: {} } })
-  const pips = (ctx: Parameters<typeof drawCards>[3]) =>
-    card(drawCards(['fire'], P('dani', { mana: 0 }), 0, ctx), 0, 1).filter(x => x === COLORS.mana || x === COLORS.manaShort).length
-  expect(pips({ duel: d })).toBe(0)
-  expect(pips({})).toBe(2)
-})
-
-test('rematch: a card of its own, wider, animated; lit under the pointer', async () => {
+test('rematch: a card of its own, wider; an hourglass runs out, turns, runs again; lit under the pointer', async () => {
   const px = drawRematch(0)
   expect(px.length).toBe(REMATCH_COLS * CARD_PX_H)
   expect(px.some(c => c !== 0 && !gray(c))).toBe(true)
-  const frames = new Set([0, 150, 300, 450].map(now => drawRematch(now).join()))
+  expect(px.includes(COLORS.sand)).toBe(true)
+  const frames = new Set([0, 600, 1200, 1800, 2400].map(now => drawRematch(now).join()))
   expect(frames.size).toBeGreaterThan(2)
+  // Sand runs down: the bottom bulb fills as the top one empties.
+  const sandIn = (now: number, top: boolean) => {
+    const p = drawRematch(now)
+    let n = 0
+    for (let y = top ? 0 : 5; y < (top ? 5 : CARD_PX_H); y++) for (let x = 0; x < REMATCH_COLS; x++) if (p[y * REMATCH_COLS + x] === COLORS.sand) n++
+    return n
+  }
+  expect(sandIn(100, true)).toBeGreaterThan(sandIn(1500, true))
+  expect(sandIn(100, false)).toBeLessThan(sandIn(1500, false))
   expect(drawRematch(0).includes(COLORS.cardHover)).toBe(false)
   expect(drawRematch(0, true).includes(COLORS.cardHover)).toBe(true)
 })

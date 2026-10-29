@@ -11,12 +11,14 @@ export const START_MANA = 1
 export const MAX_MANA = 3
 export const SHIELD_COOLDOWN = 2
 export const DRAIN_COOLDOWN = 2
-export const HEAL_COOLDOWN = 1
+export const HEAL_COOLDOWN = 7
 export const HEAL_AMOUNT = 2
 /** The Avatar State: entered at full mana, for its cost; holds this many rounds, then cools down as long. */
 export const AVATAR_NEEDS = 3
 export const AVATAR_ROUNDS = 3
 export const AVATAR_COOLDOWN = 3
+/** What an element costs in the Avatar State, to hit for 1 more; without the mana, it is cast plain. */
+export const AVATAR_HIT_COST = 1
 /** An action picked more often than this, in a game, wants rebalancing. */
 export const OVERUSED = 0.4
 
@@ -28,9 +30,9 @@ export const COST: Record<Action, number> = {
   shield: 0,
   drain: 1,
   heal: 1,
-  fire: 1,
-  water: 1,
-  nature: 1,
+  fire: 0,
+  water: 0,
+  nature: 0,
   avatar: 2,
 }
 
@@ -45,7 +47,7 @@ export const CHAOS_CHANCE = 0.25
 export const CHAOS_INFO: Record<ChaosEvent, { name: string; effect: string; rounds: number }> = {
   blizzard: { name: 'Blizzard', effect: 'the mana crystals freeze over: both drop to 0 mana', rounds: 1 },
   lightning: { name: 'Lightning Storm', effect: 'bolts strike the crystals: both at 3 mana', rounds: 1 },
-  volcano: { name: 'Volcano Eruption', effect: 'fire, water and nature cost 0 for 2 rounds', rounds: 2 },
+  volcano: { name: 'Volcano Eruption', effect: 'fire, water and nature hit for 1 more, for 2 rounds', rounds: 2 },
   eclipse: { name: 'Eclipse', effect: 'the elements turn: fire > water > nature > fire, for 2 rounds', rounds: 2 },
   rain: { name: 'Healing Rain', effect: 'both +1 life', rounds: 1 },
   quake: { name: 'Earthquake', effect: 'shields crack: no shield this round', rounds: 1 },
@@ -85,19 +87,24 @@ export function holds(duel: Pick<Duel, 'chaos' | 'round'>, event: ChaosEvent) {
   return !!c && c.event === event && duel.round >= c.round && duel.round <= c.until
 }
 
-/** What `a` costs this round: a volcano makes the basic elements free. */
-export function costOf(a: Action, duel?: Duel) {
-  return duel && isElement(a) && holds(duel, 'volcano') ? 0 : COST[a]
+/** Whether `p` casts element `a` boosted: in the Avatar State, with the mana for it. */
+export function empowered(p: Player | undefined, a: Action) {
+  return !!p && isElement(a) && p.avatarRounds > 0 && p.mana >= AVATAR_HIT_COST
+}
+
+/** What `a` costs `p` this round: an element is free, unless the Avatar State boosts it. */
+export function costOf(a: Action, p?: Player) {
+  return empowered(p, a) ? AVATAR_HIT_COST : COST[a]
 }
 
 /** Mana `p` must have to pick `a`: its cost, or for the Avatar State, full mana. */
-export function needOf(a: Action, duel?: Duel) {
-  return a === 'avatar' ? AVATAR_NEEDS : costOf(a, duel)
+export function needOf(a: Action, p?: Player) {
+  return a === 'avatar' ? AVATAR_NEEDS : costOf(a, p)
 }
 
 /** Why `p` may not pick `a` this round; null when they may. */
 export function whyNot(p: Player, a: Action, { duel }: Ctx = {}): string | null {
-  const need = needOf(a, duel)
+  const need = needOf(a, p)
   if (p.mana < need) return `needs ${need} mana`
   if (a === 'charge' && p.mana >= MAX_MANA) return 'mana full'
   if (a === 'shield' && p.shieldCooldown > 0) return `shield in ${p.shieldCooldown}`
@@ -198,12 +205,12 @@ export function applyIntent(state: HostState, player: string, intent: unknown, r
   return { duel: resolve(duel, picks, rand), picks: {} }
 }
 
-/** Damage `target` takes from `attacker` this round; an element of an avatar's hits for 1 more. */
-function damage(target: Action, attacker: Action, reversed: boolean, buffed: boolean) {
+/** Damage `target` takes from `attacker` this round; an element hits for 1 + `bonus`. */
+function damage(target: Action, attacker: Action, reversed: boolean, bonus: number) {
   const atk = isElement(attacker) ? attacker : undefined
   if (!atk && attacker !== 'drain') return 0
   if (target === 'shield') return 0
-  const power = atk && buffed ? 2 : 1
+  const power = atk ? 1 + bonus : 1
   if (!isElement(target)) {
     // Pass, charge, heal, the Avatar State entered, or a drain: an element beats a drain, two drains tie.
     return target === 'drain' && !atk ? 0 : power
@@ -223,11 +230,12 @@ function resolve(duel: Duel, picks: Record<string, Action>, rand: () => number):
     const p = duel.players[id]!
     const pick = picks[id]!
     const gain = pick === 'charge' ? (isBuffed(id) ? 2 : 1) : 0
-    ps[id] = { ...p, picked: false, mana: Math.min(MAX_MANA, p.mana - costOf(pick, duel) + gain) }
+    ps[id] = { ...p, picked: false, mana: Math.min(MAX_MANA, p.mana - costOf(pick, p) + gain) }
   }
   // 3. damage (at most one side), then heals that were not hit.
   const reversed = holds(duel, 'eclipse')
-  const dmg = { [a]: damage(picks[a]!, picks[b]!, reversed, isBuffed(b)), [b]: damage(picks[b]!, picks[a]!, reversed, isBuffed(a)) }
+  const bonus = (id: string) => (empowered(duel.players[id], picks[id]!) ? 1 : 0) + (holds(duel, 'volcano') ? 1 : 0)
+  const dmg = { [a]: damage(picks[a]!, picks[b]!, reversed, bonus(b)), [b]: damage(picks[b]!, picks[a]!, reversed, bonus(a)) }
   const loser = dmg[a]! > 0 ? a : dmg[b]! > 0 ? b : null
   const healed: Record<string, number> = {}
   for (const id of [a, b]) {

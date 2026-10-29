@@ -5,7 +5,7 @@
 // A chaos event plays `view.chaosT` ms into its own animation, after the round.
 
 import type { Action, Duel, Element, Player } from '../types'
-import { costOf, holds, isElement, MAX_MANA, needOf, whyNot, type Ctx } from './game'
+import { costOf, empowered, holds, isElement, MAX_MANA, needOf, whyNot, type Ctx } from './game'
 
 export const STAGE_ROWS = 16
 export const STAGE_PX_H = STAGE_ROWS * 2
@@ -72,6 +72,9 @@ export const COLORS = {
     sky: 0x0c1a44,
   },
   cardHover: 0xfff6d0,
+  sand: 0xe8c070,
+  sandLit: 0xfff0b0,
+  glass: 0x9fd8ff,
   cardLit: 0x2a2248,
   chaos: {
     snow: [0xffffff, 0xd8ecff],
@@ -1488,8 +1491,8 @@ function face(c: Canvas, a: Action, now: number, edge: number, cost: number, nee
 
 const edgeOf = (a: Action, big: boolean) => (big || a === 'avatar' ? COLORS.cardGold : COLORS.cardEdge)
 
-/** A card the Avatar State makes stronger: the elements and charge. */
-const boosted = (a: Action, p: Player | undefined) => !!p && p.avatarRounds > 0 && (isElement(a) || a === 'charge')
+/** A card the Avatar State makes stronger: the elements, when there is mana for it, and charge. */
+const boosted = (a: Action, p: Player | undefined) => empowered(p, a) || (!!p && p.avatarRounds > 0 && a === 'charge')
 
 /** The card under the pointer, `width` wide: a bright edge, sparks running round it. */
 function hoverRing(c: Canvas, now: number, width = CARD_W) {
@@ -1531,7 +1534,7 @@ export function drawCards(actions: Action[], p: Player | undefined, now: number,
     const big = boosted(a, p)
     const lit = i === hovered && !why
     const t = lit ? now * 2 : now
-    face(c, a, t + i * 137, edgeOf(a, big), costOf(a, ctx.duel), needOf(a, ctx.duel), !!why?.startsWith('needs'), big, lit)
+    face(c, a, t + i * 137, edgeOf(a, big), costOf(a, p), needOf(a, p), !!why?.startsWith('needs'), big, lit)
     if (lit) hoverRing(c, now)
     if (why) {
       greyOut(px, w, i * CARD_COLS)
@@ -1542,8 +1545,13 @@ export function drawCards(actions: Action[], p: Player | undefined, now: number,
   return px
 }
 
-/** The rematch card, wider than an action card: two staffs crossed, their orbs flaring, sparks where they meet. */
+/** The rematch card, wider than an action card: an hourglass runs out, turns over, runs again. */
 export const REMATCH_COLS = 2 * CARD_COLS - 1
+
+/** The hourglass, cap to cap: C cap, G glass; inside, each bulb holds SAND_CELLS grains. */
+const HOURGLASS = ['CCCCCCC', 'G.....G', '.G...G.', '..G.G..', '..G.G..', '.G...G.', 'G.....G', 'CCCCCCC']
+const SAND_RUN = 2000
+const SAND_TURN = 400
 
 export function drawRematch(now: number, hovered = false): Uint32Array {
   const w = REMATCH_COLS
@@ -1556,22 +1564,36 @@ export function drawRematch(now: number, hovered = false): Uint32Array {
       if (!corner) put(c, x, y, x === 0 || y === 0 || x === right || y === CARD_PX_H - 1 ? COLORS.cardGold : hovered ? COLORS.cardLit : COLORS.card)
     }
   }
-  const t = hovered ? now * 2 : now
-  const mid = w / 2
-  // The staffs sway in, cross, and part again.
-  const sway = Math.round(Math.sin(t / 260))
-  for (let y = 2; y <= 8; y++) {
-    put(c, mid - 4 + (y - 2) + sway, y, COLORS.host.T)
-    put(c, mid + 3 - (y - 2) - sway, y, COLORS.guest.T)
-  }
-  const glow = (Math.sin(t / 180) + 1) / 2
-  blob(c, mid - 4 + sway, 1.6, 0.8 + glow * 0.5, d => (d < 0.5 ? 0xffffff : COLORS.host.O))
-  blob(c, mid + 3 - sway, 1.6, 1.3 - glow * 0.5, d => (d < 0.5 ? 0xffffff : COLORS.guest.O))
-  // Sparks fly from the crossing.
-  for (let i = 0; i < 6; i++) {
-    const k = (t / 500 + i / 6) % 1
-    const ang = rnd(i, Math.floor(t / 500 + i / 6), 211) * Math.PI * 2
-    put(c, mid - 0.5 + Math.cos(ang) * k * 5, 4.5 + Math.sin(ang) * k * 3, COLORS.spark[i % 2]!)
+  const t = (hovered ? now * 2 : now) % (SAND_RUN + SAND_TURN)
+  const turning = t >= SAND_RUN
+  // Inside cells per bulb, in the order the sand holds them: the top drains from its surface, the bottom fills from its floor.
+  const inside = (rows: number[]) =>
+    rows.flatMap(ty => [...HOURGLASS[ty]!].map((ch, tx) => ({ tx, ty, ch })).filter(q => q.ch === '.' && q.tx > HOURGLASS[ty]!.indexOf('G') && q.tx < HOURGLASS[ty]!.lastIndexOf('G')))
+  const top = inside([3, 2, 1])
+  const bottom = inside([6, 5, 4])
+  const k = turning ? 1 : t / SAND_RUN
+  const left = Math.round(top.length * (1 - k))
+  const sand = new Set([...top.slice(0, left), ...bottom.slice(0, top.length - left)].map(q => `${q.tx},${q.ty}`))
+  // A thin stream through the neck while the top still holds some.
+  const falling = !turning && left > 0
+  const mid = Math.floor(w / 2)
+  // Turning over, the glass lies on its side a moment.
+  const at = (tx: number, ty: number) => (turning ? { x: mid - 4 + ty, y: 1 + tx } : { x: mid - 3 + tx, y: 1 + ty })
+  HOURGLASS.forEach((row, ty) =>
+    [...row].forEach((ch, tx) => {
+      const { x, y } = at(tx, ty)
+      if (ch === 'C') put(c, x, y, COLORS.thorn)
+      else if (ch === 'G') put(c, x, y, COLORS.glass)
+      else if (sand.has(`${tx},${ty}`)) put(c, x, y, COLORS.sand)
+      else if (falling && tx === 3 && ty === 4) put(c, x, y, Math.floor(t / 120) % 2 ? COLORS.sand : COLORS.sandLit)
+    }),
+  )
+  // The turn throws off a few sparks.
+  if (turning) {
+    for (let i = 0; i < 4; i++) {
+      const ang = rnd(i, Math.floor(now / 100), 211) * Math.PI * 2
+      put(c, mid + Math.cos(ang) * 6, 4.5 + Math.sin(ang) * 3.5, COLORS.spark[i % 2]!)
+    }
   }
   if (hovered) hoverRing(c, now, w)
   return px

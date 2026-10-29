@@ -47,10 +47,10 @@ secret (changeable until the other has picked):
 | pass (basic) | 0 | nothing, takes any hit: for when no other move is left | p |
 | charge (basic) | 0 | +1 mana (not at 3) | c |
 | shield (basic) | 0 | blocks all damage and theft; 2-round cooldown (round 1 → back in round 4) | s |
-| heal (basic) | 1 | +2 life (max 3), fizzles if hit; 1-round cooldown | h |
+| heal (basic) | 1 | +2 life (max 3), fizzles if hit; 7-round cooldown | h |
 | fire / water / nature | 1 | 1 damage; water > fire > nature > water | 1-3 |
 | drain | 1 | 1 damage + steals 1 mana; loses to any element; 2-round cooldown | d |
-| avatar | 2 | needs a full 3 mana. The Avatar State, for the next 3 rounds: every element hits for 1 more, charge gives 2. Entering it takes any hit, like a pass. Then 3 rounds cooldown | a |
+| avatar | 2 | needs a full 3 mana. The Avatar State, for the next 3 rounds: every element costs 1 and hits for 1 more (at 0 mana it is cast plain, free), charge gives 2. Entering it takes any hit, like a pass. Then 3 rounds cooldown | a |
 
 **Chaos.** From round 3 on, the world strikes now and then (a 1 in 4 chance a
 round, at least once by round 6, never two rounds running): the same for both
@@ -61,7 +61,7 @@ what it does, and a banner in the pane names it:
 | --- | --- |
 | ❄ Blizzard | both drop to 0 mana |
 | ⚡ Lightning Storm | both at 3 mana |
-| 🌋 Volcano Eruption | fire, water and nature cost 0 for 2 rounds |
+| 🌋 Volcano Eruption | fire, water and nature hit for 1 more, for 2 rounds |
 | 🌑 Eclipse | the elements turn round, fire > water > nature > fire, for 2 rounds |
 | 🌧 Healing Rain | both +1 life |
 | 🌍 Earthquake | no shield that round |
