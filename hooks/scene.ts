@@ -5,7 +5,7 @@
 // A chaos event plays `view.chaosT` ms into its own animation, after the round.
 
 import type { Action, Duel, Element, Player } from '../types'
-import { costOf, empowered, holds, isElement, MAX_MANA, needOf, whyNot, type Ctx } from './game'
+import { CHAOS_INFO, costOf, empowered, holds, isElement, MAX_MANA, needOf, prey, whyNot, type Ctx } from './game'
 
 export const STAGE_ROWS = 16
 export const STAGE_PX_H = STAGE_ROWS * 2
@@ -95,6 +95,8 @@ export const COLORS = {
     dust: [0x8a7a62, 0x6a5a48],
     portal: [0xb06cff, 0x5cc8ff, 0xfff0ff, 0x2a1050],
     wind: [0xd8dce8, 0x9aa0b0, 0x6a7080],
+    /** A lasting event's rounds left, set in the ground. */
+    pip: 0xffb347,
   },
   runeGlow: 0x5a3a8a,
   orbPicked: 0xffffff,
@@ -1098,6 +1100,7 @@ export function drawStage(duel: Duel, width: number, view: StageView): Uint32Arr
       sides,
     }, seed)
   }
+  if (showChaos && duel.winner === undefined) roundsLeft(c, duel, width / 2)
   still()
   // The HUD, over every effect.
   for (const side of ['host', 'guest'] as const) if (id[side]) hearts(c, xs[side], shownLife(side))
@@ -1226,6 +1229,15 @@ function cracks(c: Canvas, mid: number, k: number, seed: number) {
       if (s % 7 === 3) put(c, mid + dir * s, y + 1, COLORS.chaos.crack)
     }
   }
+}
+
+/** A lasting event's rounds left: a glowing pip each in the ground, middle of the stage. */
+function roundsLeft(c: Canvas, duel: Duel, mid: number) {
+  const ch = duel.chaos!
+  if (!CHAOS_INFO[ch.event].ongoing || !holds(duel, ch.event)) return
+  const left = ch.until - duel.round + 1
+  const x0 = Math.round(mid - (left * 3 - 1) / 2)
+  for (let i = 0; i < left; i++) for (let dx = 0; dx < 2; dx++) put(c, x0 + i * 3 + dx, STAGE_PX_H - 2, COLORS.chaos.pip)
 }
 
 /** Behind the wizards: the sky the event brings, and what stays while it holds. */
@@ -1509,13 +1521,48 @@ function hoverRing(c: Canvas, now: number, width = CARD_W) {
   }
 }
 
-/** Greys a card's pixels, `x0` to `x0 + CARD_W`, keeping the red of a missing mana. */
+/** Repaints a card's frame: `color(i)` for the i-th pixel round it. */
+function reframe(c: Canvas, color: (i: number) => number) {
+  let i = 0
+  for (let y = 0; y < CARD_PX_H; y++) {
+    for (let x = 0; x < CARD_W; x++) {
+      const corner = (x === 0 || x === CARD_W - 1) && (y === 0 || y === CARD_PX_H - 1)
+      if (!corner && (x === 0 || y === 0 || x === CARD_W - 1 || y === CARD_PX_H - 1)) put(c, x, y, color(i++))
+    }
+  }
+}
+
+/** Chaos on a card, while it holds: the volcano sets the elements ablaze, the eclipse burns round them. */
+function chaosFrame(c: Canvas, a: Action, now: number, duel: Duel | undefined) {
+  if (!duel || !isElement(a)) return
+  const { lava, corona } = COLORS.chaos
+  if (holds(duel, 'volcano')) reframe(c, i => lava[(i + Math.floor(now / 90)) % 3]!)
+  else if (holds(duel, 'eclipse')) reframe(c, i => ((i + Math.floor(now / 140)) % 4 ? corona : 0xffd0a0))
+}
+
+/** Bottom right of an element's card: the element it beats, which the eclipse turns round. */
+function preyMark(c: Canvas, a: Action, duel: Duel | undefined) {
+  if (!isElement(a)) return
+  const col = COLORS.icon[prey(a, !!duel && holds(duel, 'eclipse'))]
+  for (let y = 7; y <= 8; y++) for (let x = 6; x <= 7; x++) put(c, x, y, col)
+}
+
+/** The earthquake splits the shield card, top to bottom. */
+function crackCard(c: Canvas) {
+  const path = [4, 4, 5, 5, 4, 3, 3, 4, 5, 5]
+  path.forEach((x, y) => {
+    put(c, x, y, COLORS.chaos.crack)
+    put(c, x + 1, y, COLORS.chaos.dust[0]!)
+  })
+}
+
+/** Greys a card's pixels, `x0` to `x0 + CARD_W`, keeping the red of a missing mana and any crack. */
 function greyOut(px: Uint32Array, w: number, x0: number) {
   for (let y = 0; y < CARD_PX_H; y++) {
     for (let x = x0; x < x0 + CARD_W; x++) {
       const at = y * w + x
       const col = px[at]!
-      if (col && col !== COLORS.manaShort) px[at] = grey(col)
+      if (col && col !== COLORS.manaShort && col !== COLORS.chaos.crack) px[at] = grey(col)
     }
   }
 }
@@ -1535,12 +1582,15 @@ export function drawCards(actions: Action[], p: Player | undefined, now: number,
     const lit = i === hovered && !why
     const t = lit ? now * 2 : now
     face(c, a, t + i * 137, edgeOf(a, big), costOf(a, p), needOf(a, p), !!why?.startsWith('needs'), big, lit)
+    preyMark(c, a, ctx.duel)
+    if (!big) chaosFrame(c, a, now, ctx.duel)
     if (lit) hoverRing(c, now)
     if (why) {
       greyOut(px, w, i * CARD_COLS)
       const left = cooldownOf(p, a)
       if (left > 0) glyphs(c, GLYPHS[String(left)]!, 3, 2, COLORS.cooldown)
     }
+    if (a === 'shield' && ctx.duel && holds(ctx.duel, 'quake')) crackCard(c)
   })
   return px
 }

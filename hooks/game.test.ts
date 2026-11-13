@@ -76,7 +76,7 @@ test('legal: mana, charge cap, shield cooldown, drain cooldown, heal at full lif
   expect(legal(p, 'shield')).toBe(true)
   expect(legal(p, 'fire')).toBe(true)
   expect(legal(p, 'drain')).toBe(true)
-  expect(legal({ ...p, mana: 0 }, 'fire')).toBe(true)
+  expect(legal({ ...p, mana: 0 }, 'fire')).toBe(false)
   expect(legal({ ...p, mana: 0 }, 'drain')).toBe(false)
   expect(legal({ ...p, mana: 3 }, 'charge')).toBe(false)
   expect(legal({ ...p, shieldCooldown: 2 }, 'shield')).toBe(false)
@@ -90,7 +90,7 @@ test('legal: mana, charge cap, shield cooldown, drain cooldown, heal at full lif
 test('whyNot: says why a pick is not allowed', async () => {
   const p = start().duel.players.h!
   expect(whyNot(p, 'fire')).toBe(null)
-  expect(whyNot({ ...p, mana: 0 }, 'fire')).toBe(null)
+  expect(whyNot({ ...p, mana: 0 }, 'fire')).toBe('needs 1 mana')
   expect(whyNot({ ...p, life: 2, mana: 0 }, 'heal')).toBe('needs 1 mana')
   expect(whyNot({ ...p, life: 2, healCooldown: 1 }, 'heal')).toBe('heal in 1')
   expect(whyNot({ ...p, mana: 2 }, 'heal')).toBe('life full')
@@ -119,20 +119,20 @@ test('host rejects an illegal intent', async () => {
 const MATRIX: [Action, Action, number[], number[]][] = [
   ['charge', 'charge', [2, 3], [2, 3]],
   ['charge', 'shield', [2, 3], [2, 2]],
-  // The elements are free.
-  ['charge', 'fire', [1, 3], [2, 2]],
+  // The elements cost 1.
+  ['charge', 'fire', [1, 3], [2, 1]],
   // Gains, then loses the mana to the drainer.
   ['charge', 'drain', [1, 2], [2, 2]],
   // Heal: +2, but never past 3.
   ['charge', 'heal', [2, 3], [3, 1]],
   ['shield', 'shield', [2, 2], [2, 2]],
-  ['shield', 'fire', [2, 2], [2, 2]],
+  ['shield', 'fire', [2, 2], [2, 1]],
   ['shield', 'drain', [2, 2], [2, 1]],
   ['shield', 'heal', [2, 2], [3, 1]],
-  ['fire', 'water', [1, 2], [2, 2]],
-  ['fire', 'fire', [2, 2], [2, 2]],
-  ['fire', 'drain', [2, 2], [1, 1]],
-  ['fire', 'heal', [2, 2], [1, 1]],
+  ['fire', 'water', [1, 1], [2, 1]],
+  ['fire', 'fire', [2, 1], [2, 1]],
+  ['fire', 'drain', [2, 1], [1, 1]],
+  ['fire', 'heal', [2, 1], [1, 1]],
   ['drain', 'drain', [2, 1], [2, 1]],
   ['drain', 'heal', [2, 2], [1, 0]],
   ['heal', 'heal', [3, 1], [3, 1]],
@@ -216,8 +216,8 @@ test('first pick is hidden: only the picked flag is public', async () => {
 test('second pick resolves: picks revealed and cleared, round advances', async () => {
   const two = round(start(), 'water', 'fire')
   expect(two.picks).toEqual({})
-  expect(two.duel.players.g).toMatchObject({ life: 2, mana: 1, picked: false })
-  expect(two.duel.players.h).toMatchObject({ life: 3, mana: 1, picked: false })
+  expect(two.duel.players.g).toMatchObject({ life: 2, mana: 0, picked: false })
+  expect(two.duel.players.h).toMatchObject({ life: 3, mana: 0, picked: false })
   expect(two.duel.round).toBe(2)
 })
 
@@ -333,27 +333,28 @@ test('avatar: needs 3 mana, costs 2; not again while it holds or cools down', as
 /** Host in the Avatar State with `rounds` left, both at 2 life and 2 mana. */
 const buffed = (rounds = 3, g: Partial<Player> = {}) => withPlayers({ life: 2, mana: 2, avatarRounds: rounds }, { life: 2, mana: 2, ...g })
 
-test('avatar: every element costs 1 and hits for 1 more', async () => {
+test('avatar: every element costs 2 and hits for 1 more', async () => {
   const s = round(buffed(), 'fire', 'charge')
   expect(lm(s, 'g')).toEqual([0, 3])
-  expect(lm(s, 'h')).toEqual([2, 1])
+  expect(lm(s, 'h')).toEqual([2, 0])
   expect(s.duel.last).toMatchObject({ loser: 'g', dmg: 2, buffed: ['h'] })
   // Wins a clash for 2 too.
-  expect(lm(round(buffed(), 'water', 'fire'), 'g')).toEqual([0, 2])
+  expect(lm(round(buffed(), 'water', 'fire'), 'g')).toEqual([0, 1])
   // Same element: still a tie.
-  expect(lm(round(buffed(), 'fire', 'fire'), 'g')).toEqual([2, 2])
+  expect(lm(round(buffed(), 'fire', 'fire'), 'g')).toEqual([2, 1])
   // Losing a clash is losing it.
-  expect(lm(round(buffed(), 'fire', 'water'), 'h')).toEqual([1, 1])
+  expect(lm(round(buffed(), 'fire', 'water'), 'h')).toEqual([1, 0])
   // A drain is no element: 1, as ever.
   expect(lm(round(buffed(), 'drain', 'charge'), 'g')).toEqual([1, 2])
   // The shield still holds.
   expect(lm(round(buffed(), 'fire', 'shield'), 'g')).toEqual([2, 2])
 })
 
-test('avatar: out of mana, an element is cast plain: free, hits for 1', async () => {
+test('avatar: short of the boost, an element is cast plain: costs 1, hits for 1', async () => {
   const s0 = buffed(3, {})
-  const s = { ...s0, duel: { ...s0.duel, players: { ...s0.duel.players, h: { ...s0.duel.players.h!, mana: 0 } } } }
+  const s = { ...s0, duel: { ...s0.duel, players: { ...s0.duel.players, h: { ...s0.duel.players.h!, mana: 1 } } } }
   expect(whyNot(s.duel.players.h!, 'fire', { duel: s.duel })).toBe(null)
+  expect(whyNot({ ...s.duel.players.h!, mana: 0 }, 'fire', { duel: s.duel })).toBe('needs 1 mana')
   const after = round(s, 'fire', 'charge')
   expect(lm(after, 'h')).toEqual([2, 0])
   expect(lm(after, 'g')).toEqual([1, 3])
@@ -469,10 +470,9 @@ test('volcano: elements hit for 1 more, for two rounds', async () => {
   let s = { ...start(), duel: strike(at(4, { players: start().duel.players }), 'volcano') }
   expect(s.duel.chaos).toMatchObject({ round: 4, until: 5 })
   s = round(s, 'fire', 'water')
-  expect(lm(s, 'h')).toEqual([1, 1])
+  expect(lm(s, 'h')).toEqual([1, 0])
   expect(s.duel.last).toMatchObject({ loser: 'h', dmg: 2 })
-  // A drain is no element.
-  s = round(s, 'drain', 'shield')
+  s = round(s, 'charge', 'charge')
   s = round(s, 'charge', 'nature')
   expect(s.duel.round).toBe(7)
   expect(s.duel.last).toMatchObject({ loser: 'h', dmg: 1 })
@@ -488,8 +488,8 @@ test('eclipse: elements beat each other the other way round', async () => {
   expect(beats('fire', 'water', true)).toBe(true)
   expect(beats('water', 'fire', true)).toBe(false)
   const s = round({ ...start(), duel: strike(at(4, { players: withPlayers({ life: 2, mana: 2 }).duel.players }), 'eclipse') }, 'fire', 'water')
-  expect(lm(s, 'h')).toEqual([2, 2])
-  expect(lm(s, 'g')).toEqual([1, 2])
+  expect(lm(s, 'h')).toEqual([2, 1])
+  expect(lm(s, 'g')).toEqual([1, 1])
 })
 
 test('earthquake: no shield that round', async () => {

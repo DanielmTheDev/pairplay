@@ -9,7 +9,6 @@ import {
   MAX_MANA,
   acceptSnapshot,
   applyIntent,
-  holds,
   isAction,
   legal,
   seat,
@@ -88,15 +87,6 @@ const CHAOS_ICON: Record<ChaosEvent, string> = {
   tornado: '🌪',
 }
 
-/** The banner for the chaos holding this round, or null: its name and effect, how long it lasts. */
-function chaosBanner(d: Duel) {
-  const ch = d.chaos
-  if (!ch || d.winner !== undefined || !holds(d, ch.event)) return null
-  const info = CHAOS_INFO[ch.event]
-  const left = ch.until - d.round + 1
-  const time = ch.until === ch.round ? '' : left > 1 ? ` · ${left} rounds left` : ' · last round'
-  return `${CHAOS_ICON[ch.event]} ${info.name}${d.round === ch.round ? '!' : ''} ${info.effect}${time}`
-}
 
 const room = atom({ plugin: 'pairplay', key: 'room' } as const, null, { shape: 'room-1' })
 const peers = atom({ plugin: 'pairplay', key: 'peers' } as const, {}, { shape: 'peers-1' })
@@ -714,8 +704,6 @@ export const register: Register = (on, options) => {
     // Cards only where they fit: on a short pane the buttons alone, under the stage.
     const cardsFit = !e.viewport || e.viewport.rows >= DUEL_ROWS + buttons.length * (CARD_ROWS + 1)
     shownCards = Client && cardsFit ? buttons : []
-    // Announced once the round that brought it has played.
-    const banner = playing ? null : chaosBanner(g)
     const logLines = r ? lines.slice(-LOG_LINES) : []
 
     return (
@@ -739,11 +727,6 @@ export const register: Register = (on, options) => {
                 rows={STAGE_ROWS}
                 cells={encodeCells(drawStage(g, stageCols, view), stageCols, STAGE_PX_H)}
               />
-            )}
-            {banner && (
-              <Text color="#ffb347" bold>
-                {banner}
-              </Text>
             )}
             {Object.entries(g.players).map(([id, p]) =>
               Raster ? (

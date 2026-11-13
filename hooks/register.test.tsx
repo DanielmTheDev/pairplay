@@ -660,7 +660,7 @@ test('host: own cast and a guest intent at the same moment both count', async ($
 
 // ─── chaos ───────────────────────────────────────────────────────────────────
 
-test('chaos: announced in the pane, name and effect, and how long a lasting one holds', async ($, on) => {
+test('chaos: no banner in the pane; the stage and the cards show it', async ($, on) => {
   const chaos = { event: 'eclipse', round: 4, until: 5, before: { host: { life: 3, mana: 1 }, 'my-session': { life: 3, mana: 1 } } }
   const duel = { seq: 9, round: 4, players: { host: P('dani'), 'my-session': P('alice') }, chaos, chaosCount: 1 }
   let deliver = (_: string[]) => {}
@@ -670,12 +670,12 @@ test('chaos: announced in the pane, name and effect, and how long a lasting one 
   await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
   await settle()
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /Eclipse!.*fire > water > nature > fire.*2 rounds left/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /rounds left/ })).toBeUndefined()
   await ui.unmount()
   deliver([ntfy('m2', { from: 'host', name: 'dani', type: 'state', payload: { ...duel, seq: 10, round: 5 } })])
   await settle()
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /Eclipse.*last round/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /last round/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -703,7 +703,6 @@ test('chaos: plays after the round that brought it, then says so in the log', as
   await ui.unmount()
   await clock.advance(3000)
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /Lightning Storm!.*both at 3 mana/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /chaos Lightning Storm/ })).toBeDefined()
   await ui.unmount()
 })

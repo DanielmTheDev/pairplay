@@ -18,7 +18,7 @@ export const AVATAR_NEEDS = 3
 export const AVATAR_ROUNDS = 3
 export const AVATAR_COOLDOWN = 3
 /** What an element costs in the Avatar State, to hit for 1 more; without the mana, it is cast plain. */
-export const AVATAR_HIT_COST = 1
+export const AVATAR_HIT_COST = 2
 /** An action picked more often than this, in a game, wants rebalancing. */
 export const OVERUSED = 0.4
 
@@ -30,9 +30,9 @@ export const COST: Record<Action, number> = {
   shield: 0,
   drain: 1,
   heal: 1,
-  fire: 0,
-  water: 0,
-  nature: 0,
+  fire: 1,
+  water: 1,
+  nature: 1,
   avatar: 2,
 }
 
@@ -44,13 +44,14 @@ export const CHAOS_FROM = 3
 export const CHAOS_BY = 6
 export const CHAOS_CHANCE = 0.25
 
-export const CHAOS_INFO: Record<ChaosEvent, { name: string; effect: string; rounds: number }> = {
+/** `ongoing`: changes the rules while it holds, not just once when it strikes. */
+export const CHAOS_INFO: Record<ChaosEvent, { name: string; effect: string; rounds: number; ongoing?: boolean }> = {
   blizzard: { name: 'Blizzard', effect: 'the mana crystals freeze over: both drop to 0 mana', rounds: 1 },
   lightning: { name: 'Lightning Storm', effect: 'bolts strike the crystals: both at 3 mana', rounds: 1 },
-  volcano: { name: 'Volcano Eruption', effect: 'fire, water and nature hit for 1 more, for 2 rounds', rounds: 2 },
-  eclipse: { name: 'Eclipse', effect: 'the elements turn: fire > water > nature > fire, for 2 rounds', rounds: 2 },
+  volcano: { name: 'Volcano Eruption', effect: 'fire, water and nature hit for 1 more, for 2 rounds', rounds: 2, ongoing: true },
+  eclipse: { name: 'Eclipse', effect: 'the elements turn: fire > water > nature > fire, for 2 rounds', rounds: 2, ongoing: true },
   rain: { name: 'Healing Rain', effect: 'both +1 life', rounds: 1 },
-  quake: { name: 'Earthquake', effect: 'shields crack: no shield this round', rounds: 1 },
+  quake: { name: 'Earthquake', effect: 'shields crack: no shield this round', rounds: 1, ongoing: true },
   rift: { name: 'Time Rift', effect: 'every cooldown is reset', rounds: 1 },
   tornado: { name: 'Tornado', effect: 'the mana whirls together: both get the average', rounds: 1 },
 }
@@ -67,6 +68,11 @@ export type Ctx = { duel?: Duel }
 /** Whether `a` beats `b`; under an eclipse, the other way round. */
 export function beats(a: Element, b: Element, reversed = false) {
   return reversed ? BEATS[b] === a : BEATS[a] === b
+}
+
+/** The element `a` beats; under an eclipse, the other way round. */
+export function prey(a: Element, reversed = false): Element {
+  return reversed ? ELEMENTS.find(b => BEATS[b] === a)! : BEATS[a]
 }
 
 export function isElement(raw: unknown): raw is Element {
@@ -92,7 +98,7 @@ export function empowered(p: Player | undefined, a: Action) {
   return !!p && isElement(a) && p.avatarRounds > 0 && p.mana >= AVATAR_HIT_COST
 }
 
-/** What `a` costs `p` this round: an element is free, unless the Avatar State boosts it. */
+/** What `a` costs `p` this round: an element 1, or 2 when the Avatar State boosts it. */
 export function costOf(a: Action, p?: Player) {
   return empowered(p, a) ? AVATAR_HIT_COST : COST[a]
 }

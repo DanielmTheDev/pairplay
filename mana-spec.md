@@ -21,7 +21,7 @@ Design goal: **no dominant strategy**. Every action is beaten by some other acti
 | Pass | 0 | Nothing; takes any hit. So nobody is ever stuck with no legal action | — |
 | Charge | 0 | +1 mana | Illegal at 3 mana |
 | Shield | 0 | Blocks all damage and mana theft this round | 2-round cooldown |
-| Fire / Water / Nature | 0 | 1 damage to the opponent if it lands. In the Avatar State: costs 1, deals 2; at 0 mana cast plain (free, 1) | — |
+| Fire / Water / Nature | 1 | 1 damage to the opponent if it lands. In the Avatar State: costs 2, deals 2; at 1 mana cast plain (1, 1) | — |
 | Drain | 1 | No element. If it lands: 1 damage, and 1 mana moves from the opponent to you (the drainer is capped at 3) | 2-round cooldown |
 | Heal | 1 | +2 life (max 3). Fizzles if you are hit this round | Illegal at 3 life. 7-round cooldown |
 | Avatar State | 2 | No attack: takes any hit that round, like Pass. For the next 3 rounds, every element the avatar casts deals 1 more, and Charge gives +2 (capped at 3) | Needs 3 mana. Not while it holds; then a 3-round cooldown |
@@ -89,7 +89,7 @@ Fair for both players, never a hit, never deciding a game on their own.
 | Tornado | Both get the average of their mana, rounded up | — |
 
 - Each event plays its world animation after the round that brought it (snow, storm, eruption, eclipse, rain, quake, rift, tornado), then its effect on the players (gems freezing and shattering, bolts lighting them, embers in the staffs, the element ring turning back, hearts refilling, shields cracking, time streaming in, mana whirling across). Life and mana change on that cue.
-- The pane announces it with its name and effect, and how many rounds a lasting one has left; the log keeps it.
+- No text banner: the log names it; while a lasting one holds, the cards show it (volcano: element cards' frames ablaze; eclipse: frames ringed in fire, each element's beats-dot turned round; earthquake: shield card cracked) and pips in the ground count its rounds left.
 
 ## Legality and visibility
 

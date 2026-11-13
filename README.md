@@ -50,12 +50,16 @@ secret (changeable until the other has picked):
 | heal (basic) | 1 | +2 life (max 3), fizzles if hit; 7-round cooldown | h |
 | fire / water / nature | 1 | 1 damage; water > fire > nature > water | 1-3 |
 | drain | 1 | 1 damage + steals 1 mana; loses to any element; 2-round cooldown | d |
-| avatar | 2 | needs a full 3 mana. The Avatar State, for the next 3 rounds: every element costs 1 and hits for 1 more (at 0 mana it is cast plain, free), charge gives 2. Entering it takes any hit, like a pass. Then 3 rounds cooldown | a |
+| avatar | 2 | needs a full 3 mana. The Avatar State, for the next 3 rounds: every element costs 2 and hits for 1 more (at 1 mana it is cast plain, for 1), charge gives 2. Entering it takes any hit, like a pass. Then 3 rounds cooldown | a |
 
 **Chaos.** From round 3 on, the world strikes now and then (a 1 in 4 chance a
 round, at least once by round 6, never two rounds running): the same for both
 players and never a hit. Each plays its own animation after the round, then
-what it does, and a banner in the pane names it:
+what it does; the log names it. While a lasting one holds, the cards show it
+(volcano: elements ablaze; eclipse: elements ringed in fire, the beats-dot
+turned round; earthquake: shield cracked) and glowing pips in the ground
+count its rounds left. Each element card's bottom-right dot is the element it
+beats:
 
 | Event | Effect |
 | --- | --- |

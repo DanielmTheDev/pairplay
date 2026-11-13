@@ -347,14 +347,14 @@ test('cards: a ready spell is drawn in its colors, and moves', async () => {
 
 test('cards: in the Avatar State, elements and charge glow gold', async () => {
   for (const a of ['fire', 'water', 'nature', 'charge'] as const) {
-    const plain = card(drawCards([a], P('dani', { mana: 1 }), 0), 0, 1)
-    const buffed = card(drawCards([a], P('dani', { mana: 1, avatarRounds: 2 }), 0), 0, 1)
+    const plain = card(drawCards([a], P('dani', { mana: 2 }), 0), 0, 1)
+    const buffed = card(drawCards([a], P('dani', { mana: 2, avatarRounds: 2 }), 0), 0, 1)
     expect(plain.includes(COLORS.cardGold)).toBe(false)
     expect(buffed.includes(COLORS.cardGold)).toBe(true)
   }
   expect(card(drawCards(['shield'], P('dani', { avatarRounds: 2 }), 0), 0, 1).includes(COLORS.cardGold)).toBe(false)
-  // Out of mana, an element is cast plain.
-  expect(card(drawCards(['fire'], P('dani', { mana: 0, avatarRounds: 2 }), 0), 0, 1).includes(COLORS.cardGold)).toBe(false)
+  // Short of the boost, an element is cast plain.
+  expect(card(drawCards(['fire'], P('dani', { mana: 1, avatarRounds: 2 }), 0), 0, 1).includes(COLORS.cardGold)).toBe(false)
 })
 
 test('cards: the one under the pointer lights up', async () => {
@@ -382,10 +382,11 @@ test('cards: cost shown as mana pips, missing ones marked', async () => {
     return [c.filter(x => x === COLORS.mana).length, c.filter(x => x === COLORS.manaShort).length]
   }
   expect(pips('charge', 1)).toEqual([0, 0])
-  // The elements are free; in the Avatar State they cost 1, unless cast plain.
-  expect(pips('fire', 1)).toEqual([0, 0])
+  // The elements cost 1; in the Avatar State 2, unless cast plain.
+  expect(pips('fire', 1)).toEqual([2, 0])
+  expect(pips('fire', 0)).toEqual([0, 2])
+  expect(pips('fire', 2, 2)).toEqual([4, 0])
   expect(pips('fire', 1, 2)).toEqual([2, 0])
-  expect(pips('fire', 0, 2)).toEqual([0, 0])
   // The Avatar State costs 2 but needs a full 3: the third pip only asks for it.
   expect(pips('avatar', 3)).toEqual([4, 0])
   expect(pips('avatar', 2)).toEqual([0, 6])
@@ -525,6 +526,49 @@ test('volcano: smokes on the horizon while it holds', async () => {
   const d = struck('volcano')
   expect(has(drawStage(d, W, view()), COLORS.chaos.rock)).toBe(true)
   expect(has(drawStage(duel({ round: 6, chaos: d.chaos! }), W, view()), COLORS.chaos.rock)).toBe(false)
+})
+
+test('chaos on the cards: volcano sets the elements ablaze, while it holds', async () => {
+  const p = P('dani', { mana: 2 })
+  const d = struck('volcano')
+  // The top edge of the card.
+  const top = (a: Action, ctx = {}) => card(drawCards([a], p, 0, ctx), 0, 1).slice(1, CW - 2)
+  const lava = (px: number[]) => px.some(c => (COLORS.chaos.lava as readonly number[]).includes(c))
+  for (const a of ['fire', 'water', 'nature'] as const) {
+    expect(lava(top(a, { duel: d }))).toBe(true)
+    expect(lava(top(a, { duel: duel({ round: 6, chaos: d.chaos! }) }))).toBe(false)
+  }
+  expect(lava(top('charge', { duel: d }))).toBe(false)
+})
+
+test('cards: an element shows what it beats; the eclipse turns it round', async () => {
+  const p = P('dani', { mana: 2 })
+  const fire = (ctx = {}) => card(drawCards(['fire'], p, 0, ctx), 0, 1)
+  expect(fire().includes(COLORS.icon.nature)).toBe(true)
+  expect(fire().includes(COLORS.icon.water)).toBe(false)
+  const d = struck('eclipse')
+  expect(fire({ duel: d }).includes(COLORS.icon.water)).toBe(true)
+  expect(fire({ duel: d }).includes(COLORS.icon.nature)).toBe(false)
+  expect(fire({ duel: d }).includes(COLORS.chaos.corona)).toBe(true)
+  expect(fire({ duel: duel({ round: 6, chaos: d.chaos! }) }).includes(COLORS.chaos.corona)).toBe(false)
+})
+
+test('chaos on the cards: the earthquake cracks the shield', async () => {
+  const p = P('dani', { mana: 2 })
+  const shield = (ctx = {}) => card(drawCards(['shield'], p, 0, ctx), 0, 1)
+  expect(shield({ duel: struck('quake') }).includes(COLORS.chaos.crack)).toBe(true)
+  expect(shield().includes(COLORS.chaos.crack)).toBe(false)
+})
+
+test('chaos on the stage: a lasting one counts its rounds down in the ground', async () => {
+  const pips = (d: Duel) => count(drawStage(d, W, view()), COLORS.chaos.pip)
+  const v = struck('volcano')
+  expect(pips(v)).toBe(4)
+  expect(pips({ ...v, round: 5 })).toBe(2)
+  expect(pips({ ...v, round: 6 })).toBe(0)
+  expect(pips(struck('quake'))).toBe(2)
+  // What strikes once has nothing to count.
+  expect(pips(struck('blizzard'))).toBe(0)
 })
 
 test('chaos runs a fixed length', async () => {
