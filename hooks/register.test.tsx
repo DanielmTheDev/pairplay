@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { CHAOS_LOOK } from './rules'
 import { COLORS } from './scene'
 
 const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`
@@ -660,7 +661,7 @@ test('host: own cast and a guest intent at the same moment both count', async ($
 
 // ─── chaos ───────────────────────────────────────────────────────────────────
 
-test('chaos: no banner in the pane; the stage and the cards show it', async ($, on) => {
+test('chaos: a banner under the stage names the event and its effect while it holds', async ($, on) => {
   const chaos = { event: 'eclipse', round: 4, until: 5, before: { host: { life: 3, mana: 1 }, 'my-session': { life: 3, mana: 1 } } }
   const duel = { seq: 9, round: 4, players: { host: P('dani'), 'my-session': P('alice') }, chaos, chaosCount: 1 }
   let deliver = (_: string[]) => {}
@@ -670,12 +671,44 @@ test('chaos: no banner in the pane; the stage and the cards show it', async ($, 
   await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
   await settle()
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /rounds left/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Box', key: 'chaos' })).toMatchObject({ props: { borderStyle: 'round', borderColor: CHAOS_LOOK.eclipse.color } })
+  expect(await ui.find({ type: 'Text', text: /^🌑 Eclipse$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^The elements turn: fire > water > nature > fire, for 2 rounds$/ })).toBeDefined()
+  // Only the event and its effect: no forecast, no hint, no countdown.
+  expect(await ui.find({ type: 'Text', text: /rounds left|last round|next round/i })).toBeUndefined()
   await ui.unmount()
-  deliver([ntfy('m2', { from: 'host', name: 'dani', type: 'state', payload: { ...duel, seq: 10, round: 5 } })])
+  // Over: gone.
+  deliver([ntfy('m2', { from: 'host', name: 'dani', type: 'state', payload: { ...duel, seq: 10, round: 6 } })])
   await settle()
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /last round/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Box', key: 'chaos' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Eclipse/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('chaos: the banner stays while its last round plays, then goes', async ($, on) => {
+  const chaos = { event: 'quake', round: 4, until: 4, before: { host: { life: 3, mana: 1 }, 'my-session': { life: 3, mana: 1 } } }
+  const during = { seq: 9, round: 4, players: { host: P('dani'), 'my-session': P('alice') }, chaos, chaosCount: 1 }
+  const after = {
+    ...during,
+    seq: 10,
+    round: 5,
+    last: { round: 4, picks: { host: 'charge', 'my-session': 'charge' }, loser: null, dmg: 0, stole: false, healed: {}, buffed: [] },
+  }
+  let deliver = (_: string[]) => {}
+  const more = new Promise<string[]>(r => (deliver = r))
+  const { clock } = harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: during })], { more })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  deliver([ntfy('m2', { from: 'host', name: 'dani', type: 'state', payload: after })])
+  await settle()
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^🌍 Earthquake$/ })).toBeDefined()
+  await ui.unmount()
+  await clock.advance(3000)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Box', key: 'chaos' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -698,11 +731,85 @@ test('chaos: plays after the round that brought it, then says so in the log', as
   await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
   await settle()
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  // The round plays first: no spoiler.
+  // The round plays first: no spoiler, no banner yet.
   expect(await ui.find({ type: 'Text', text: /Lightning Storm/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Box', key: 'chaos' })).toBeUndefined()
   await ui.unmount()
   await clock.advance(3000)
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /chaos Lightning Storm/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^⚡ Lightning Storm$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// ─── rulebook ────────────────────────────────────────────────────────────────
+
+test('rules: a book at the top opens the rulebook in place of the cards; b closes it', async ($, on) => {
+  const duel = { seq: 5, round: 2, players: { host: P('dani'), 'my-session': P('alice') } }
+  harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Client', key: 'book' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'rules' })).toMatchObject({ props: { label: 'rules', hotkey: 'b' } })
+  await ui.press({ key: 'rules' })
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /Rulebook/ })).toBeDefined()
+  // The cards make way.
+  expect(await ui.find({ type: 'Client', key: 'cards-0' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'fire' })).toBeUndefined()
+  // The first page: the cards drawn, every action explained.
+  expect(await ui.find({ type: 'Raster', key: 'rule-cards-0' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^fire · water · nature ◆ / })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'page-2' })).toMatchObject({ props: { label: 'Clashes', hotkey: '2' } })
+  await ui.press({ key: 'page-4' })
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /❄ Blizzard/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^fire · water · nature/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'rules' })).toMatchObject({ props: { label: 'back to the duel', hotkey: 'b' } })
+  await ui.press({ key: 'rules' })
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /Rulebook/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Client', key: 'cards-0' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('rules: a click on the book opens them; /coop rules too, even out of a room', async ($, on) => {
+  const duel = { seq: 5, round: 2, players: { host: P('dani'), 'my-session': P('alice') } }
+  harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const res = await $.command.run({ command: 'coop', args: 'rules' })
+  expect(res.text).toMatch(/Rulebook opened/)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Rulebook/ })).toBeDefined()
+  await ui.press({ key: 'rules' })
+  await settle()
+  await ui.unmount()
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Rulebook/ })).toBeUndefined()
+  await ui.pointer({ in: 'book', type: 'down', x: 3, y: 1, button: 'left' })
+  await settle()
+  expect(await ui.find({ type: 'Text', text: /Rulebook/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('pane: the book and every card row draw on a narrow pane, mid-duel', async ($, on) => {
+  const duel = {
+    seq: 5,
+    round: 2,
+    players: { host: P('dani', { mana: 0 }), 'my-session': P('alice', { mana: 0, drainCooldown: 2, picked: true }) },
+    last: { round: 1, picks: { host: 'drain', 'my-session': 'nature' }, loser: 'host', dmg: 1, stole: false, healed: {}, buffed: [] },
+  }
+  harness(on, [ntfy('m1', { from: 'host', name: 'dani', type: 'state', payload: duel })])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'coop', args: 'join ABCD-EFGH' })
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 48 } })
+  for (const k of ['book', 'cards-0', 'cards-1']) {
+    expect(JSON.stringify(await ui.drawn({ in: k }))).toMatch(/▀/)
+  }
   await ui.unmount()
 })

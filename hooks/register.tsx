@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Action, ChaosEvent, Conn, Duel, LogLine, Peer, Player } from '../types'
+import type { Action, Conn, Duel, LogLine, Peer, Player } from '../types'
 import {
   ACTIONS,
   CHAOS_INFO,
@@ -9,6 +9,7 @@ import {
   MAX_MANA,
   acceptSnapshot,
   applyIntent,
+  chaosNow,
   isAction,
   legal,
   seat,
@@ -17,14 +18,22 @@ import {
   type Intent,
 } from './game'
 import {
+  BOOK_COLS,
+  BOOK_ROWS,
   CARD_COLS,
+  CARD_PX_H,
   CARD_ROWS,
   CHAOS_MS,
   FRAME_MS,
   REMATCH_COLS,
   STAGE_PX_H,
   STAGE_ROWS,
+  WHEEL_COLS,
+  WHEEL_PX_H,
+  WHEEL_ROWS,
+  drawRuleCards,
   drawStage,
+  drawWheel,
   encodeCells,
   roundMs,
   stageColumns,
@@ -46,6 +55,7 @@ import {
   type Envelope,
 } from './protocol'
 import type { CardsProps } from './cards'
+import { CHAOS_LOOK, HELP, RULE_CARDS, RULE_PAGES, type RuleLine } from './rules'
 import { notifiers } from './notify'
 
 const PANE = 'pairplay'
@@ -73,19 +83,10 @@ function cardRows(columns: number) {
 /** Lines of the log the pane shows, right under the cards. */
 const LOG_LINES = 2
 
-/** Pane rows the duel needs besides the cards: header, round, stage, players, pass, the log, input. */
-const DUEL_ROWS = 2 + 1 + 1 + STAGE_ROWS + 2 + 1 + 1 + LOG_LINES + 1
-
-const CHAOS_ICON: Record<ChaosEvent, string> = {
-  blizzard: '❄',
-  lightning: '⚡',
-  volcano: '🌋',
-  eclipse: '🌑',
-  rain: '🌧',
-  quake: '🌍',
-  rift: '🌀',
-  tornado: '🌪',
-}
+/** Pane rows the duel needs besides the cards: header (as tall as the book and its key), round, stage, players, pass, the log, input. */
+const DUEL_ROWS = BOOK_ROWS + 1 + 1 + 1 + STAGE_ROWS + 2 + 1 + 1 + LOG_LINES + 1
+/** The chaos banner's rows: its frame, the event, its effect. */
+const BANNER_ROWS = 4
 
 
 const room = atom({ plugin: 'pairplay', key: 'room' } as const, null, { shape: 'room-1' })
@@ -99,18 +100,8 @@ const game = atom({ plugin: 'pairplay', key: 'game' } as const, INITIAL_DUEL, { 
 const picks = atom({ plugin: 'pairplay', key: 'picks' } as const, {})
 // Guest only: what this player cast this round, for the icon over their head.
 const mine = atom({ plugin: 'pairplay', key: 'mine' } as const, null)
-
-const HELP = [
-  '/coop host          create a room, share the code',
-  '/coop join <code> [relay]  join the other player',
-  '/coop relay [url]   show or switch the relay (both players)',
-  '/coop say <text>    chat (or type in the pane)',
-  '/coop <action>      pass | charge | shield | heal | drain (1 mana) | fire | water | nature (free)',
-  '                    avatar (at 3 mana, costs 2): elements cost 1 for +1 dmg (free + plain at 0 mana), charge +1, 3 rounds',
-  '/coop rematch       new duel after one is won',
-  '/coop leave         leave the room',
-  '/coop               open the pane',
-].join('\n')
+// The rulebook page open in the pane, in place of the cards; null: the duel.
+const rules = atom({ plugin: 'pairplay', key: 'rules' } as const, null)
 
 type $ = EngineInterface
 
@@ -320,7 +311,7 @@ async function onDuelChange($: $, before: Duel, after: Duel) {
       void quietly(async () => {
         const info = CHAOS_INFO[ch.event]
         await addLog($, 'chaos', `${info.name}: ${info.effect}`)
-        $.ui.toast(`${CHAOS_ICON[ch.event]} ${info.name}!`)
+        $.ui.toast(`${CHAOS_LOOK[ch.event].icon} ${info.name}!`)
       }),
     )
   }
@@ -590,6 +581,19 @@ async function say($: $, text: string) {
   return (await send($, 'say', text)) ? `sent: ${text}` : 'Send failed, see pane.'
 }
 
+/** Opens the rulebook at its first page, or closes it. */
+async function toggleRules($: $) {
+  await update($, rules, page => (page === null ? 0 : null))
+}
+
+/** The rows of `items` that fit a pane `columns` wide, CARDS_PER_ROW at most. */
+function rowsOf<T>(items: T[], columns: number) {
+  const per = Math.max(1, Math.min(CARDS_PER_ROW, Math.floor(columns / CARD_COLS)))
+  return Array.from({ length: Math.ceil(items.length / per) }, (_, i) => items.slice(i * per, (i + 1) * per))
+}
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+
 export const register: Register = (on, options) => {
   configuredRelay = normalizeRelay(String(options.relayUrl || '')) ?? 'https://ntfy.sh'
   // A fresh activation owns nothing of an earlier one's timers or queue.
@@ -664,6 +668,10 @@ export const register: Register = (on, options) => {
       }
       case 'rematch':
         return { text: await act($, { kind: 'rematch' }) }
+      case 'rules':
+        await update($, rules, () => 0)
+        await $.ui.open({ id: PANE, title: 'Co-op', focus: true })
+        return { text: 'Rulebook opened in the pane (b closes it).' }
       default: {
         const action = verb.toLowerCase()
         if (isAction(action)) return { text: await act($, { kind: 'act', action }) }
@@ -675,8 +683,9 @@ export const register: Register = (on, options) => {
   // A click on a card (./cards.tsx): cast it, or ask for the rematch.
   on('ui.message', async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const data = e.data as { action?: unknown; rematch?: unknown } | null
+    const data = e.data as { action?: unknown; rematch?: unknown; rules?: unknown } | null
     if (e.element === 'rematch' && data?.rematch === true) await act($, { kind: 'rematch' })
+    else if (e.element === 'book' && data?.rules === true) await toggleRules($)
     else if (e.element.startsWith('cards-') && isAction(data?.action)) await act($, { kind: 'act', action: data.action })
     return {}
   })
@@ -700,21 +709,88 @@ export const register: Register = (on, options) => {
     const color = (id: string) => (id === Object.keys(g.players)[0] ? '#7f9cff' : '#ff6f86')
     const you = g.players[me]
     const ctx = { duel: g }
-    const buttons = r && g.winner === undefined ? cardRows(e.props.bodyColumns) : []
+    // The rulebook takes the cards' place while it is open.
+    const page = await read($, rules)
+    const book = page === null ? null : (RULE_PAGES[page] ?? RULE_PAGES[0]!)
+    const buttons = r && g.winner === undefined && !book ? cardRows(e.props.bodyColumns) : []
+    // The event happening now, in a banner under the stage: from its strike until its last round has played.
+    const event = chaosNow(g, playing)
     // Cards only where they fit: on a short pane the buttons alone, under the stage.
-    const cardsFit = !e.viewport || e.viewport.rows >= DUEL_ROWS + buttons.length * (CARD_ROWS + 1)
+    const cardsFit = !e.viewport || e.viewport.rows >= DUEL_ROWS + (event ? BANNER_ROWS : 0) + buttons.length * (CARD_ROWS + 1)
     shownCards = Client && cardsFit ? buttons : []
     const logLines = r ? lines.slice(-LOG_LINES) : []
+    const now = await $.clock.now()
+    const spans = (l: RuleLine) =>
+      l.length === 0 ? (
+        <Text> </Text>
+      ) : (
+        <Text>
+          {l.map(s => (
+            <Text {...(s.color ? { color: s.color } : {})} {...(s.bold ? { bold: true } : {})} {...(s.dim ? { dimColor: true } : {})}>
+              {s.text}
+            </Text>
+          ))}
+        </Text>
+      )
 
     return (
       <Box flexDirection="column">
-        <Text bold>
-          {r ? `Room ${r.code}` : 'No room'} <Text dimColor>· {c} · you are {myName}</Text>
-        </Text>
-        <Text dimColor>
-          {live.length === 0 ? 'waiting for the other player…' : `with: ${live.map(([, p]) => p.name).join(', ')}`}
-        </Text>
-        {r && (
+        <Box flexDirection="row">
+          <Box flexDirection="column" flexGrow={1}>
+            <Text bold>
+              {r ? `Room ${r.code}` : 'No room'} <Text dimColor>· {c} · you are {myName}</Text>
+            </Text>
+            <Text dimColor>
+              {live.length === 0 ? 'waiting for the other player…' : `with: ${live.map(([, p]) => p.name).join(', ')}`}
+            </Text>
+          </Box>
+          {/* The rulebook's button: a book that opens, and its key under it. */}
+          <Box flexDirection="column" alignItems="center" flexShrink={0}>
+            {Client && (
+              <Client key="book" module="./cards.tsx" width={BOOK_COLS} height={BOOK_ROWS} props={{ kind: 'book', open: !!book } satisfies CardsProps} />
+            )}
+            <Button key="rules" label={book ? 'back to the duel' : 'rules'} hotkey="b" plain onPress={() => void toggleRules($)} />
+          </Box>
+        </Box>
+        {book && (
+          <Box flexDirection="column" marginTop={1}>
+            <Text>
+              <Text bold color="#e8b830">
+                📖 Rulebook
+              </Text>
+              <Text dimColor> · {book.title}</Text>
+            </Text>
+            <Box flexDirection="row" flexWrap="wrap">
+              {RULE_PAGES.map((p, i) => (
+                <Box marginRight={2} flexShrink={0}>
+                  <Button
+                    key={`page-${i + 1}`}
+                    label={p.title}
+                    hotkey={String(i + 1)}
+                    plain
+                    {...(p === book ? {} : { dimColor: true })}
+                    onPress={() => void update($, rules, () => i)}
+                  />
+                </Box>
+              ))}
+            </Box>
+            {Raster &&
+              book.art === 'cards' &&
+              rowsOf(RULE_CARDS, e.props.bodyColumns).map((row, i) => (
+                <Raster
+                  key={`rule-cards-${i}`}
+                  columns={row.length * CARD_COLS}
+                  rows={CARD_ROWS}
+                  cells={encodeCells(drawRuleCards(row, now), row.length * CARD_COLS, CARD_PX_H)}
+                />
+              ))}
+            {Raster && book.art === 'wheel' && (
+              <Raster key="rule-wheel" columns={WHEEL_COLS} rows={WHEEL_ROWS} cells={encodeCells(drawWheel(), WHEEL_COLS, WHEEL_PX_H)} />
+            )}
+            {book.lines.map(spans)}
+          </Box>
+        )}
+        {r && !book && (
           <Box flexDirection="column" marginTop={1}>
             <Text bold>
               {playing ? `round ${g.round - 1}…` : g.winner ? `${nameOf(g, g.winner)} wins!` : `round ${g.round}`}{' '}
@@ -727,6 +803,14 @@ export const register: Register = (on, options) => {
                 rows={STAGE_ROWS}
                 cells={encodeCells(drawStage(g, stageCols, view), stageCols, STAGE_PX_H)}
               />
+            )}
+            {event && (
+              <Box key="chaos" flexDirection="column" borderStyle="round" borderColor={CHAOS_LOOK[event].color} paddingX={1}>
+                <Text bold color={CHAOS_LOOK[event].color}>
+                  {`${CHAOS_LOOK[event].icon} ${CHAOS_INFO[event].name}`}
+                </Text>
+                <Text>{capitalize(CHAOS_INFO[event].effect)}</Text>
+              </Box>
             )}
             {Object.entries(g.players).map(([id, p]) =>
               Raster ? (
@@ -799,7 +883,7 @@ export const register: Register = (on, options) => {
         )}
         {/* The log, right under the cards: the last lines only, bright. */}
         <Box flexDirection="column" marginTop={r ? 0 : 1}>
-          {!r && <Text dimColor>{HELP}</Text>}
+          {!r && !book && <Text dimColor>{HELP}</Text>}
           {logLines.map(l =>
             l.kind === 'chat' ? (
               <Text>

@@ -6,6 +6,7 @@ import {
   applyIntent,
   beats,
   CHAOS_EVENTS,
+  chaosNow,
   INITIAL_DUEL,
   isAction,
   isDuel,
@@ -508,4 +509,26 @@ test('chaos survives the wire, and a rematch clears it', async () => {
   const again = applyIntent({ ...won, duel: { ...won.duel, chaos: d.chaos!, chaosCount: 1 } }, 'h', { kind: 'rematch' })!
   expect(again.duel.chaos).toBe(undefined)
   expect(again.duel.chaosCount).toBe(undefined)
+})
+
+test('chaosNow: the event on screen, from the round it strikes until that round has played', async () => {
+  const d = strike(at(4), 'eclipse')
+  expect(d.chaos).toMatchObject({ round: 4, until: 5 })
+  // The round that brought it is still playing: no forecast.
+  expect(chaosNow(d, true)).toBe(null)
+  // It strikes as that round has played, and holds.
+  expect(chaosNow(d, false)).toBe('eclipse')
+  expect(chaosNow({ ...d, round: 5 }, false)).toBe('eclipse')
+  // Its last round still playing out: still there.
+  expect(chaosNow({ ...d, round: 6 }, true)).toBe('eclipse')
+  // Over once that round has played.
+  expect(chaosNow({ ...d, round: 6 }, false)).toBe(null)
+  // One that strikes once: its own round only.
+  const b = strike(at(4), 'blizzard')
+  expect(chaosNow(b, false)).toBe('blizzard')
+  expect(chaosNow({ ...b, round: 5 }, true)).toBe('blizzard')
+  expect(chaosNow({ ...b, round: 5 }, false)).toBe(null)
+  // None, or someone won: nothing.
+  expect(chaosNow(at(4), false)).toBe(null)
+  expect(chaosNow({ ...d, winner: 'h' }, false)).toBe(null)
 })

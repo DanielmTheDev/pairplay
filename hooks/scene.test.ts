@@ -13,7 +13,14 @@ import {
   SPRITE_TOP,
   STAGE_PX_H,
   REMATCH_COLS,
+  BOOK_COLS,
+  BOOK_PX_H,
+  WHEEL_COLS,
+  WHEEL_PX_H,
+  drawBook,
   drawCards,
+  drawRuleCards,
+  drawWheel,
   drawRematch,
   drawStage,
   encodeCells,
@@ -573,4 +580,32 @@ test('chaos on the stage: a lasting one counts its rounds down in the ground', a
 
 test('chaos runs a fixed length', async () => {
   expect(CHAOS_MS).toBeGreaterThan(3000)
+})
+
+test('book: a closed book that opens while the rulebook is up, and lights under the pointer', async () => {
+  const shut = drawBook(0, false)
+  const open = drawBook(0, true)
+  expect(shut.length).toBe(BOOK_COLS * BOOK_PX_H)
+  expect(shut.includes(COLORS.book.cover)).toBe(true)
+  expect(shut.includes(COLORS.book.gold)).toBe(true)
+  expect(open.includes(COLORS.book.page)).toBe(true)
+  expect([...open]).not.toEqual([...shut])
+  expect([...drawBook(0, false, true)]).not.toEqual([...shut])
+})
+
+test('rule cards: every card in its colours, never greyed for want of a player', async () => {
+  const actions = ['fire', 'charge', 'avatar'] as const
+  const px = drawRuleCards([...actions], 0)
+  expect(px.length).toBe(actions.length * CARD_COLS * CARD_PX_H)
+  expect(card(px, 0, 3).includes(COLORS.mana)).toBe(true)
+  expect(card(px, 2, 3).includes(COLORS.mana)).toBe(true)
+  expect(card(px, 1, 3).includes(COLORS.mana)).toBe(false)
+  expect(card(px, 0, 3).includes(COLORS.icon.nature)).toBe(true)
+})
+
+test('wheel: the three elements, arrows from winner to loser', async () => {
+  const px = drawWheel()
+  expect(px.length).toBe(WHEEL_COLS * WHEEL_PX_H)
+  for (const e of ['fire', 'water', 'nature'] as const) expect(px.includes(COLORS.icon[e])).toBe(true)
+  expect(px.includes(COLORS.wheelArrow)).toBe(true)
 })

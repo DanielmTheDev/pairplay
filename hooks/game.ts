@@ -93,6 +93,18 @@ export function holds(duel: Pick<Duel, 'chaos' | 'round'>, event: ChaosEvent) {
   return !!c && c.event === event && duel.round >= c.round && duel.round <= c.until
 }
 
+/**
+ * The chaos event happening on screen, for the banner: from the moment it strikes (once the round
+ * that brought it has played) until its last round has played. `playing`: a round's animation runs,
+ * so the screen still shows the round before `duel.round`.
+ */
+export function chaosNow(duel: Duel, playing: boolean): ChaosEvent | null {
+  const c = duel.chaos
+  if (!c || duel.winner !== undefined) return null
+  const shown = playing ? duel.round - 1 : duel.round
+  return shown >= c.round && shown <= c.until ? c.event : null
+}
+
 /** Whether `p` casts element `a` boosted: in the Avatar State, with the mana for it. */
 export function empowered(p: Player | undefined, a: Action) {
   return !!p && isElement(a) && p.avatarRounds > 0 && p.mana >= AVATAR_HIT_COST

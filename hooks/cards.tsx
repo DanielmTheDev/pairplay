@@ -1,16 +1,18 @@
 // Surface module: a row of cards, drawn as half blocks and animated here, that a
 // click presses. A Raster takes no presses, so the cards are Text in a Client;
-// a press goes to the hooks module as a post, { action }, or { rematch: true }.
+// a press goes to the hooks module as a post, { action }, { rematch: true } or { rules: true }.
 // The card under the pointer lights up: hover is the module's own state.
 
 import type { ClientModule } from 'claude-code'
 
 import type { Action, Duel, Player } from '../types'
-import { CARD_COLS, CARD_PX_H, FRAME_MS, REMATCH_COLS, drawCards, drawRematch } from './scene'
+import { BOOK_COLS, BOOK_PX_H, CARD_COLS, CARD_PX_H, FRAME_MS, REMATCH_COLS, drawBook, drawCards, drawRematch } from './scene'
 
 export type CardsProps =
   | { kind: 'cards'; actions: Action[]; player: Player | null; duel: Duel; pressable: Action[] }
   | { kind: 'rematch' }
+  /** The rulebook's button: open while the rules are up. */
+  | { kind: 'book'; open: boolean }
 
 type Run = { text: string; fg?: string; bg?: string }
 
@@ -18,9 +20,9 @@ const DEFAULT = 0x01000000
 const hex = (c: number) => (c === DEFAULT ? undefined : `#${c.toString(16).padStart(6, '0')}`)
 
 /** The pixels as rows of cells, two pixel rows a cell, joined into runs of one color pair. */
-export function runs(px: Uint32Array, width: number): Run[][] {
+export function runs(px: Uint32Array, width: number, heightPx = CARD_PX_H): Run[][] {
   const out: Run[][] = []
-  for (let r = 0; r < CARD_PX_H / 2; r++) {
+  for (let r = 0; r < heightPx / 2; r++) {
     const row: Run[] = []
     for (let x = 0; x < width; x++) {
       const top = px[2 * r * width + x]!
@@ -50,9 +52,14 @@ const Cards: ClientModule<CardsProps, State> = (props, surface) => {
   const now = surface.state?.t ?? Date.now()
   const hover = surface.state?.hover ?? -1
   const rematch = props.kind === 'rematch'
-  const width = rematch ? REMATCH_COLS : props.actions.length * CARD_COLS
-  const px = rematch ? drawRematch(now, hover === 0) : drawCards(props.actions, props.player ?? undefined, now, { duel: props.duel }, hover)
-  const cardAt = (x: number) => (rematch ? (x >= 0 && x < REMATCH_COLS ? 0 : -1) : Math.floor(x / CARD_COLS))
+  const book = props.kind === 'book'
+  const width = props.kind === 'rematch' ? REMATCH_COLS : props.kind === 'book' ? BOOK_COLS : props.actions.length * CARD_COLS
+  const px =
+    props.kind === 'rematch' ? drawRematch(now, hover === 0)
+    : props.kind === 'book' ? drawBook(now, props.open, hover === 0)
+    : drawCards(props.actions, props.player ?? undefined, now, { duel: props.duel }, hover)
+  const one = rematch || book
+  const cardAt = (x: number) => (one ? (x >= 0 && x < width ? 0 : -1) : Math.floor(x / CARD_COLS))
   surface.onPointer(e => {
     if (e.type === 'leave') {
       if (hover !== -1) surface.setState({ t: now, hover: -1 })
@@ -64,8 +71,8 @@ const Cards: ClientModule<CardsProps, State> = (props, surface) => {
       return
     }
     if (e.type !== 'down' || e.button !== 'left') return
-    if (rematch) {
-      if (cardAt(e.x) === 0) surface.post({ rematch: true })
+    if (props.kind === 'rematch' || props.kind === 'book') {
+      if (cardAt(e.x) === 0) surface.post(props.kind === 'book' ? { rules: true } : { rematch: true })
       return
     }
     const a = props.actions[cardAt(e.x)]
@@ -73,7 +80,7 @@ const Cards: ClientModule<CardsProps, State> = (props, surface) => {
   })
   return (
     <Box flexDirection="column">
-      {runs(px, width).map(row => (
+      {runs(px, width, book ? BOOK_PX_H : CARD_PX_H).map(row => (
         <Text>
           {row.map(r => (
             <Text {...(r.fg ? { color: r.fg } : {})} {...(r.bg ? { backgroundColor: r.bg } : {})}>

@@ -89,7 +89,7 @@ Fair for both players, never a hit, never deciding a game on their own.
 | Tornado | Both get the average of their mana, rounded up | — |
 
 - Each event plays its world animation after the round that brought it (snow, storm, eruption, eclipse, rain, quake, rift, tornado), then its effect on the players (gems freezing and shattering, bolts lighting them, embers in the staffs, the element ring turning back, hearts refilling, shields cracking, time streaming in, mana whirling across). Life and mana change on that cue.
-- No text banner: the log names it; while a lasting one holds, the cards show it (volcano: element cards' frames ablaze; eclipse: frames ringed in fire, each element's beats-dot turned round; earthquake: shield card cracked) and pips in the ground count its rounds left.
+- A banner under the stage names the event and its effect, from the moment it strikes until its last round has played (no forecast before, no hint, no countdown); the log keeps a line. While a lasting one holds, the cards show it (volcano: element cards' frames ablaze; eclipse: frames ringed in fire, each element's beats-dot turned round; earthquake: shield card cracked) and pips in the ground count its rounds left.
 
 ## Legality and visibility
 

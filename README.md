@@ -37,7 +37,8 @@ own deploy (`relay/README.md`); the host's `/coop host` then copies a
 | chat: type in the pane, or `/coop say hi` | same |
 | duel: `/coop charge`, `/coop fire` … (or the pane cards) | `/coop shield` |
 
-Mana duel (full rules: `mana-spec.md`). 3 life, start with 1 mana, cap 3.
+Mana duel (full rules: `mana-spec.md`, or the rulebook in the pane: the book at
+the top, `b`, or `/coop rules`). 3 life, start with 1 mana, cap 3.
 
 The duel starts once both are in the room. Both pick one action a round in
 secret (changeable until the other has picked):
@@ -55,7 +56,9 @@ secret (changeable until the other has picked):
 **Chaos.** From round 3 on, the world strikes now and then (a 1 in 4 chance a
 round, at least once by round 6, never two rounds running): the same for both
 players and never a hit. Each plays its own animation after the round, then
-what it does; the log names it. While a lasting one holds, the cards show it
+what it does. A banner under the stage names the event and its effect from the
+moment it strikes until its last round has played; the log keeps a line. While
+a lasting one holds, the cards show it
 (volcano: elements ablaze; eclipse: elements ringed in fire, the beats-dot
 turned round; earthquake: shield cracked) and glowing pips in the ground
 count its rounds left. Each element card's bottom-right dot is the element it

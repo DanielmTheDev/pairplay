@@ -5,7 +5,7 @@
 // A chaos event plays `view.chaosT` ms into its own animation, after the round.
 
 import type { Action, Duel, Element, Player } from '../types'
-import { CHAOS_INFO, costOf, empowered, holds, isElement, MAX_MANA, needOf, prey, whyNot, type Ctx } from './game'
+import { CHAOS_INFO, COST, costOf, empowered, holds, isElement, MAX_MANA, needOf, prey, whyNot, type Ctx } from './game'
 
 export const STAGE_ROWS = 16
 export const STAGE_PX_H = STAGE_ROWS * 2
@@ -76,6 +76,20 @@ export const COLORS = {
   sandLit: 0xfff0b0,
   glass: 0x9fd8ff,
   cardLit: 0x2a2248,
+  /** The rulebook's button: a closed book, open while the rules are up. */
+  book: {
+    cover: 0x6a3ab0,
+    coverLit: 0x8a5ad8,
+    spine: 0x3e2070,
+    gold: 0xe8b830,
+    glint: 0xfff3b0,
+    page: 0xf3ead2,
+    pageShade: 0xc9bfa6,
+    ink: 0x8a7a62,
+  },
+  /** The rulebook's element wheel: arrows from winner to loser. */
+  wheelArrow: 0x8f88b0,
+  wheelHead: 0xe9e6f6,
   chaos: {
     snow: [0xffffff, 0xd8ecff],
     frost: 0xcfeaff,
@@ -1820,4 +1834,83 @@ function toBase64(bytes: Uint8Array) {
     out += i + 2 < bytes.length ? B64[n & 63]! : '='
   }
   return out
+}
+
+// ─── the rulebook ────────────────────────────────────────────────────────────
+
+/** The rulebook's cards: as the pane draws them for a player with every action to hand. */
+export function drawRuleCards(actions: Action[], now: number): Uint32Array {
+  const w = actions.length * CARD_COLS
+  const px = new Uint32Array(w * CARD_PX_H)
+  actions.forEach((a, i) => {
+    const c: Canvas = { w, px, ox: i * CARD_COLS, oy: 0 }
+    face(c, a, now + i * 137, edgeOf(a, false), COST[a], needOf(a), false)
+    preyMark(c, a, undefined)
+  })
+  return px
+}
+
+export const BOOK_COLS = 10
+export const BOOK_ROWS = 3
+export const BOOK_PX_H = BOOK_ROWS * 2
+const BOOK_GLINT_MS = 2400
+
+/** S spine, C cover, G gold title, P page edge. */
+const BOOK_SHUT = ['.SCCCCCCC.', 'SSCCGGGGCP', 'SSCCCCCCCP', 'SSCCGGGCCP', 'SSCCCCCCCP', '.PPPPPPPP.']
+/** P page, L a line of writing, D the fold, C the cover below. */
+const BOOK_OPEN = ['.PPPDDPPP.', 'PLLPDDPLLP', 'PLLLDDLLLP', 'PLLPDDPLLP', 'CPPPDDPPPC', '.CCCCCCCC.']
+
+/** The button that opens the rulebook: a closed book whose title glints now and then; open while the rules are up. */
+export function drawBook(now: number, open: boolean, hovered = false): Uint32Array {
+  const px = new Uint32Array(BOOK_COLS * BOOK_PX_H)
+  const c: Canvas = { w: BOOK_COLS, px, ox: 0, oy: 0 }
+  const b = COLORS.book
+  const cover = hovered ? b.coverLit : b.cover
+  // The glint sweeps across the title, then rests.
+  const glintX = Math.floor(((hovered ? now * 2 : now) % BOOK_GLINT_MS) / 80)
+  ;(open ? BOOK_OPEN : BOOK_SHUT).forEach((row, y) =>
+    [...row].forEach((ch, x) => {
+      const col =
+        ch === 'S' ? b.spine
+        : ch === 'C' ? cover
+        : ch === 'G' ? (x === glintX || x === glintX - 1 ? b.glint : b.gold)
+        : ch === 'P' ? (hovered && open ? 0xffffff : b.page)
+        : ch === 'D' ? b.pageShade
+        : ch === 'L' ? b.ink
+        : 0
+      if (col) put(c, x, y, col)
+    }),
+  )
+  return px
+}
+
+export const WHEEL_COLS = 23
+export const WHEEL_ROWS = 7
+export const WHEEL_PX_H = WHEEL_ROWS * 2
+const WHEEL_AT: Record<Element, Pt> = { water: { x: 11, y: 2 }, fire: { x: 19, y: 11 }, nature: { x: 3, y: 11 } }
+
+/** The element wheel: an orb each, an arrow from each to the one it beats (turned round by an eclipse). */
+export function drawWheel(reversed = false): Uint32Array {
+  const px = new Uint32Array(WHEEL_COLS * WHEEL_PX_H)
+  const c: Canvas = { w: WHEEL_COLS, px, ox: 0, oy: 0 }
+  for (const a of ['water', 'fire', 'nature'] as const) {
+    const from = WHEEL_AT[a]
+    const to = WHEEL_AT[prey(a, reversed)]
+    const steps = 24
+    for (let i = 7; i <= steps - 7; i++) put(c, from.x + ((to.x - from.x) * i) / steps, from.y + ((to.y - from.y) * i) / steps, COLORS.wheelArrow)
+    const k = (steps - 7) / steps
+    const hx = from.x + (to.x - from.x) * k
+    const hy = from.y + (to.y - from.y) * k
+    put(c, hx, hy, COLORS.wheelHead)
+    put(c, hx + Math.sign(from.x - to.x), hy, COLORS.wheelHead)
+    put(c, hx, hy + Math.sign(from.y - to.y), COLORS.wheelHead)
+  }
+  for (const [a, o] of Object.entries(WHEEL_AT) as [Element, Pt][]) {
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        if (dx * dx + dy * dy <= 5) put(c, o.x + dx, o.y + dy, dx === -1 && dy === -1 ? COLORS.iconShade[a] : COLORS.icon[a])
+      }
+    }
+  }
+  return px
 }

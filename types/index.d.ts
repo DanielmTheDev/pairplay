@@ -76,6 +76,8 @@ declare module 'claude-code' {
       game: Shaped<Duel>
       picks: Record<string, Action>
       mine: { round: number; action: Action } | null
+      /** The rulebook page open in the pane; null: the duel. */
+      rules: number | null
     }
   }
 }
