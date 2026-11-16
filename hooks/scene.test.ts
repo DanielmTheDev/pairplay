@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Action, ChaosEvent, Duel, Player } from '../types'
-import { CHAOS_EVENTS } from './game'
+import { AVATAR_COOLDOWN, CHAOS_EVENTS, DRAIN_COOLDOWN, HEAL_COOLDOWN, SHIELD_COOLDOWN } from './game'
 import {
   AVATAR_PRELUDE,
   CARD_COLS,
@@ -608,4 +608,11 @@ test('wheel: the three elements, arrows from winner to loser', async () => {
   expect(px.length).toBe(WHEEL_COLS * WHEEL_PX_H)
   for (const e of ['fire', 'water', 'nature'] as const) expect(px.includes(COLORS.icon[e])).toBe(true)
   expect(px.includes(COLORS.wheelArrow)).toBe(true)
+})
+
+test('cards: every cooldown up to the longest draws its number', async () => {
+  for (let n = 1; n <= Math.max(HEAL_COOLDOWN, SHIELD_COOLDOWN, DRAIN_COOLDOWN, AVATAR_COOLDOWN); n++) {
+    const p = P('dani', { life: 2, mana: 3, healCooldown: n })
+    expect(card(drawCards(['heal'], p, 0), 0, 1).includes(COLORS.cooldown)).toBe(true)
+  }
 })
